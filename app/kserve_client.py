@@ -133,7 +133,13 @@ class KServeClient:
                             "name": "custom"
                         },
                         "runtime": model_config.get("runtime", "qwen-vllm-runtime"),
-                        "storageUri": f"hf://{model_config['hfModelId']}"
+                        "storageUri": f"hf://{model_config['hfModelId']}",
+                        "storage": {
+                            "persistentVolumeClaim": {
+                                "claimName": "venus-model-storage",
+                                "subPath": model_config["id"]
+                            }
+                        }
                     }
                 }
             }
