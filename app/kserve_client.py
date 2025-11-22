@@ -114,6 +114,17 @@ class KServeClient:
     def _build_inferenceservice(self, model_config: dict) -> dict:
         """Build an InferenceService manifest from model config."""
         # Base InferenceService structure
+        storage_config = model_config.get("storage")
+
+        # Default storage configuration leverages the shared PVC on venus.
+        if not storage_config:
+            storage_config = {
+                "persistentVolumeClaim": {
+                    "claimName": "venus-model-storage",
+                    "subPath": model_config["id"]
+                }
+            }
+
         isvc = {
             "apiVersion": f"{self.group}/{self.version}",
             "kind": "InferenceService",
@@ -134,12 +145,7 @@ class KServeClient:
                         },
                         "runtime": model_config.get("runtime", "qwen-vllm-runtime"),
                         "storageUri": f"hf://{model_config['hfModelId']}",
-                        "storage": {
-                            "persistentVolumeClaim": {
-                                "claimName": "venus-model-storage",
-                                "subPath": model_config["id"]
-                            }
-                        }
+                        "storage": storage_config
                     }
                 }
             }

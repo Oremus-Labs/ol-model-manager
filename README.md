@@ -28,8 +28,8 @@ HTTP API service for dynamically managing KServe InferenceServices based on mode
 ## Building
 
 ```bash
-docker build -t ghcr.io/oremus-labs/model-manager:v0.1.0 .
-docker push ghcr.io/oremus-labs/model-manager:v0.1.0
+docker build -t ghcr.io/oremus-labs/ol-model-manager:0.1.3 .
+docker push ghcr.io/oremus-labs/ol-model-manager:0.1.3
 ```
 
 ## Running Locally

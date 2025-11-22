@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="Model Manager",
     description="Dynamic LLM model management for KServe",
-    version="0.1.0"
+    version="0.1.3"
 )
 
 # Configuration from environment
@@ -69,12 +69,24 @@ async def health():
 @app.get("/models")
 async def list_models():
     """List all available models."""
+    try:
+        catalog.reload_catalog()
+    except Exception as e:
+        logger.error(f"Failed to reload catalog: {e}")
+        raise HTTPException(status_code=500, detail="Failed to reload model catalog")
+
     return catalog.list_models()
 
 
 @app.get("/models/{model_id}")
 async def get_model(model_id: str):
     """Get details for a specific model."""
+    try:
+        catalog.reload_catalog()
+    except Exception as e:
+        logger.error(f"Failed to reload catalog: {e}")
+        raise HTTPException(status_code=500, detail="Failed to reload model catalog")
+
     model = catalog.get_model(model_id)
     if not model:
         raise HTTPException(status_code=404, detail=f"Model {model_id} not found")
@@ -87,6 +99,12 @@ async def activate_model(request: ActivateRequest):
     logger.info(f"Activating model: {request.id}")
 
     # Get model config
+    try:
+        catalog.reload_catalog()
+    except Exception as e:
+        logger.error(f"Failed to reload catalog: {e}")
+        raise HTTPException(status_code=500, detail="Failed to reload model catalog")
+
     model = catalog.get_model(request.id)
     if not model:
         raise HTTPException(status_code=404, detail=f"Model {request.id} not found")
