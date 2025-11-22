@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="Model Manager",
     description="Dynamic LLM model management for KServe",
-    version="0.1.3"
+    version="0.1.4"
 )
 
 # Configuration from environment

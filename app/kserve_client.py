@@ -114,16 +114,7 @@ class KServeClient:
     def _build_inferenceservice(self, model_config: dict) -> dict:
         """Build an InferenceService manifest from model config."""
         # Base InferenceService structure
-        storage_config = model_config.get("storage")
-
-        # Default storage configuration leverages the shared PVC on venus.
-        if not storage_config:
-            storage_config = {
-                "persistentVolumeClaim": {
-                    "claimName": "venus-model-storage",
-                    "subPath": model_config["id"]
-                }
-            }
+        storage_uri = model_config.get("storageUri", f"hf://{model_config['hfModelId']}")
 
         isvc = {
             "apiVersion": f"{self.group}/{self.version}",
@@ -144,12 +135,15 @@ class KServeClient:
                             "name": "custom"
                         },
                         "runtime": model_config.get("runtime", "qwen-vllm-runtime"),
-                        "storageUri": f"hf://{model_config['hfModelId']}",
-                        "storage": storage_config
+                        "storageUri": storage_uri
                     }
                 }
             }
         }
+
+        # Attach storage settings when provided so KServe knows which volume to mount.
+        if "storage" in model_config:
+            isvc["spec"]["predictor"]["model"]["storage"] = model_config["storage"]
 
         # Add node selector if provided
         if "nodeSelector" in model_config:
@@ -162,5 +156,16 @@ class KServeClient:
         # Add resources if provided
         if "resources" in model_config:
             isvc["spec"]["predictor"]["model"]["resources"] = model_config["resources"]
+
+        # Apply additional container environment variables if specified
+        if "env" in model_config:
+            isvc["spec"]["predictor"]["model"]["env"] = model_config["env"]
+
+        # Attach extra volume mounts/volumes for persistent storage when explicitly requested.
+        if "volumeMounts" in model_config:
+            isvc["spec"]["predictor"]["model"]["volumeMounts"] = model_config["volumeMounts"]
+
+        if "volumes" in model_config:
+            isvc["spec"]["predictor"]["volumes"] = model_config["volumes"]
 
         return isvc
