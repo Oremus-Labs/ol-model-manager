@@ -5,11 +5,12 @@ interface SectionProps {
   description?: string;
   action?: ReactNode;
   children: ReactNode;
+  id?: string;
 }
 
-export function Section({ title, description, action, children }: SectionProps) {
+export function Section({ title, description, action, children, id }: SectionProps) {
   return (
-    <section className="space-y-4 rounded-3xl border border-white/5 bg-white/5 p-6 shadow-card backdrop-blur">
+    <section id={id} className="space-y-4 rounded-3xl border border-white/5 bg-white/5 p-6 shadow-card backdrop-blur">
       <header className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
         <div>
           <h2 className="text-lg font-semibold text-white">{title}</h2>
