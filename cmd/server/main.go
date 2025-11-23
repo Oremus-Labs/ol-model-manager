@@ -229,7 +229,7 @@ func setupRouter(h *handlers.Handler, apiToken string) *gin.Engine {
 
 	// HuggingFace discovery
 	router.GET("/huggingface/search", h.SearchHuggingFace)
-	router.GET("/huggingface/models/:id", h.GetHuggingFaceModel)
+	router.GET("/huggingface/models/*id", h.GetHuggingFaceModel)
 
 	// vLLM discovery endpoints
 	router.GET("/vllm/supported-models", h.ListVLLMArchitectures)

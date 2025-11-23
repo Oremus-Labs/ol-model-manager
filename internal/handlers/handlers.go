@@ -704,7 +704,7 @@ func (h *Handler) GetHuggingFaceModel(c *gin.Context) {
 		c.JSON(http.StatusNotImplemented, gin.H{"error": "vLLM discovery is disabled"})
 		return
 	}
-	id := c.Param("id")
+	id := strings.TrimPrefix(c.Param("id"), "/")
 	autoDetect := c.Query("autoDetect") == "true"
 
 	info, err := h.vllm.DescribeModel(id, autoDetect)
