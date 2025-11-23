@@ -19,6 +19,7 @@ type Manager struct {
 	storagePath    string
 	downloadClient *http.Client
 	hfBaseURL      string
+	reservedNames  map[string]struct{}
 }
 
 // Option configures a Manager at construction.
@@ -80,6 +81,11 @@ func New(storagePath string, opts ...Option) *Manager {
 		storagePath:    storagePath,
 		downloadClient: &http.Client{Timeout: 5 * time.Minute},
 		hfBaseURL:      "https://huggingface.co",
+		reservedNames: map[string]struct{}{
+			".hf-cache":  {},
+			"modules":    {},
+			"lost+found": {},
+		},
 	}
 	for _, opt := range opts {
 		opt(m)
@@ -105,6 +111,10 @@ func (m *Manager) List() ([]WeightInfo, error) {
 			continue
 		}
 
+		if m.isReserved(entry.Name()) {
+			continue
+		}
+
 		modelPath := filepath.Join(m.storagePath, entry.Name())
 		info, err := m.getWeightInfo(modelPath, entry.Name())
 		if err != nil {
@@ -125,6 +135,9 @@ func (m *Manager) List() ([]WeightInfo, error) {
 
 // Get returns information about a specific model's weights.
 func (m *Manager) Get(modelName string) (*WeightInfo, error) {
+	if m.isReserved(modelName) {
+		return nil, fmt.Errorf("model weights not found: %s", modelName)
+	}
 	modelPath := filepath.Join(m.storagePath, modelName)
 
 	if _, err := os.Stat(modelPath); os.IsNotExist(err) {
@@ -136,6 +149,9 @@ func (m *Manager) Get(modelName string) (*WeightInfo, error) {
 
 // Delete removes a model's weights from storage.
 func (m *Manager) Delete(modelName string) error {
+	if m.isReserved(modelName) {
+		return fmt.Errorf("model weights not found: %s", modelName)
+	}
 	modelPath := filepath.Join(m.storagePath, modelName)
 
 	if _, err := os.Stat(modelPath); os.IsNotExist(err) {
@@ -225,6 +241,10 @@ func (m *Manager) InstallFromHuggingFace(ctx context.Context, opts InstallOption
 		return nil, fmt.Errorf("failed to derive target directory name")
 	}
 
+	if m.isReserved(target) {
+		return nil, fmt.Errorf("cannot install weights into reserved path: %s", target)
+	}
+
 	revision := opts.Revision
 	if revision == "" {
 		revision = "main"
@@ -291,6 +311,17 @@ func (m *Manager) InstallFromHuggingFace(ctx context.Context, opts InstallOption
 	}
 
 	return info, nil
+}
+
+func (m *Manager) isReserved(name string) bool {
+	if name == "" {
+		return true
+	}
+	if strings.HasPrefix(name, ".") {
+		return true
+	}
+	_, ok := m.reservedNames[name]
+	return ok
 }
 
 func (m *Manager) getWeightInfo(path, name string) (*WeightInfo, error) {

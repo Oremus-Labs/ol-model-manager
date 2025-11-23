@@ -51,3 +51,47 @@ func TestInstallFromHuggingFaceDownloadsFiles(t *testing.T) {
 		t.Fatalf("expected size %d, got %d", len("tiny-model"), info.SizeBytes)
 	}
 }
+
+func TestListSkipsReservedAndHiddenDirs(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+
+	dirs := []struct {
+		name string
+		file string
+	}{
+		{"qwen2.5-0.5b", "model.safetensors"},
+		{".hf-cache", "cache.bin"},
+		{"modules", "readme.txt"},
+	}
+
+	for _, d := range dirs {
+		dirPath := filepath.Join(tmpDir, d.name)
+		if err := os.MkdirAll(dirPath, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dirPath, err)
+		}
+		if err := os.WriteFile(filepath.Join(dirPath, d.file), []byte("data"), 0o644); err != nil {
+			t.Fatalf("write file: %v", err)
+		}
+	}
+
+	manager := New(tmpDir)
+
+	list, err := manager.List()
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+
+	if len(list) != 1 {
+		t.Fatalf("expected 1 entry, got %d: %+v", len(list), list)
+	}
+
+	if list[0].Name != "qwen2.5-0.5b" {
+		t.Fatalf("unexpected entry %+v", list[0])
+	}
+
+	if _, err := manager.Get(".hf-cache"); err == nil {
+		t.Fatalf("expected error when getting reserved directory")
+	}
+}
