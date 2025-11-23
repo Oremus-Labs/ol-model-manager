@@ -1,3 +1,5 @@
+'use client';
+
 import type { Architecture } from '@/lib/types';
 
 interface Props {
