@@ -1,0 +1,8 @@
+Dockerfile*
+.git
+.gitignore
+README.md
+*.md
+app/
+requirements.txt
+model-manager
