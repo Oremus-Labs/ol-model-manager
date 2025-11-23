@@ -31,7 +31,7 @@ import (
 )
 
 const (
-	version         = "0.4.1-go"
+	version         = "0.4.2-go"
 	shutdownTimeout = 5 * time.Second
 )
 
@@ -210,6 +210,7 @@ func setupRouter(h *handlers.Handler, apiToken string) *gin.Engine {
 	// vLLM discovery endpoints
 	router.GET("/vllm/supported-models", h.ListVLLMArchitectures)
 	router.POST("/vllm/discover", h.DiscoverModel)
+	router.POST("/vllm/model-info", h.DescribeVLLMModel)
 
 	protected := router.Group("/")
 	protected.Use(authMiddleware(apiToken))

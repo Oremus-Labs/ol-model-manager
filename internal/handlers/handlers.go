@@ -46,6 +46,7 @@ type discoveryService interface {
 	ListSupportedArchitectures() ([]vllm.ModelArchitecture, error)
 	GenerateModelConfig(vllm.GenerateRequest) (*catalog.Model, error)
 	GetHuggingFaceModel(string) (*vllm.HuggingFaceModel, error)
+	DescribeModel(string, bool) (*vllm.ModelInsight, error)
 }
 
 type catalogValidator interface {
@@ -117,6 +118,11 @@ type installWeightsRequest struct {
 	Target    string   `json:"target,omitempty"`
 	Files     []string `json:"files,omitempty"`
 	Overwrite bool     `json:"overwrite"`
+}
+
+type modelInfoRequest struct {
+	HFModelID string `json:"hfModelId" binding:"required"`
+	AutoDetect bool  `json:"autoDetect"`
 }
 
 type testModelRequest struct {
@@ -439,7 +445,7 @@ func (h *Handler) InstallWeights(c *gin.Context) {
 
 	files := req.Files
 	if len(files) == 0 {
-		files = collectHuggingFaceFiles(hfModel)
+		files = vllm.CollectHuggingFaceFiles(hfModel)
 	}
 
 	if len(files) == 0 {
@@ -522,6 +528,29 @@ func (h *Handler) DiscoverModel(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, model)
+}
+
+// DescribeVLLMModel returns Hugging Face metadata plus compatibility info.
+func (h *Handler) DescribeVLLMModel(c *gin.Context) {
+	if h.vllm == nil {
+		c.JSON(http.StatusNotImplemented, gin.H{"error": "vLLM discovery is disabled"})
+		return
+	}
+
+	var req modelInfoRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	info, err := h.vllm.DescribeModel(req.HFModelID, req.AutoDetect)
+	if err != nil {
+		log.Printf("Failed to describe model %s: %v", req.HFModelID, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, info)
 }
 
 // GenerateCatalogEntry produces a draft catalog model with optional overrides.
@@ -718,28 +747,6 @@ func (h *Handler) ensureCatalogFresh(force bool) error {
 		h.lastCatalogRefresh = time.Now()
 	}
 	return nil
-}
-
-func collectHuggingFaceFiles(model *vllm.HuggingFaceModel) []string {
-	files := make([]string, 0, len(model.Siblings))
-	seen := make(map[string]struct{})
-
-	for _, sibling := range model.Siblings {
-		name := sibling.RFileName
-		if name == "" || name == "." {
-			continue
-		}
-		if name[len(name)-1] == '/' {
-			continue
-		}
-		if _, ok := seen[name]; ok {
-			continue
-		}
-		seen[name] = struct{}{}
-		files = append(files, name)
-	}
-
-	return files
 }
 
 func (h *Handler) checkReadiness(ctx context.Context, url string, timeoutSeconds int) gin.H {

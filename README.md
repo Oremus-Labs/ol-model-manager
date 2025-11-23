@@ -13,6 +13,7 @@ HTTP API service for dynamically managing KServe InferenceServices based on mode
 - Validate catalog entries against the shared schema, PVC/secret availability, and GPU capacity
 - Dry-run KServe activations (and optional readiness probes) before flipping production traffic
 - Estimate GPU compatibility + runtime recommendations per catalog entry
+- Inspect Hugging Face metadata (downloads, tags, compatibility) before installing a model
 
 ## Environment Variables
 
@@ -47,6 +48,7 @@ HTTP API service for dynamically managing KServe InferenceServices based on mode
 - `POST /catalog/generate` - Generate a catalog JSON stub (wrapper around discovery helpers)
 - `POST /catalog/validate` - Validate a catalog entry against schema + cluster resources
 - `POST /catalog/pr` - Save a catalog entry, commit it, and open a GitHub pull request
+- `POST /vllm/model-info` - Describe a Hugging Face model (metadata, compatibility, suggested catalog entry)
 - `GET /recommendations/{gpuType}` - Suggested vLLM flags/notes for the GPU profile
 - `GET /weights` - List all installed weight directories
 - `GET /weights/usage` - PVC usage statistics
@@ -60,8 +62,8 @@ HTTP API service for dynamically managing KServe InferenceServices based on mode
 ## Building
 
 ```bash
-docker build -t ghcr.io/oremus-labs/ol-model-manager:0.4.1-go .
-docker push ghcr.io/oremus-labs/ol-model-manager:0.4.1-go
+docker build -t ghcr.io/oremus-labs/ol-model-manager:0.4.2-go .
+docker push ghcr.io/oremus-labs/ol-model-manager:0.4.2-go
 ```
 
 ## Running Locally

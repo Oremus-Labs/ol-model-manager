@@ -7,23 +7,26 @@ import (
 	"io"
 	"net/http"
 	"regexp"
+	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/oremus-labs/ol-model-manager/internal/catalog"
 )
 
 const (
-	vllmModelsURL  = "https://api.github.com/repos/vllm-project/vllm/contents/vllm/model_executor/models"
-	vllmRawBaseURL = "https://raw.githubusercontent.com/vllm-project/vllm/main/vllm/model_executor/models"
-	hfAPIURL       = "https://huggingface.co/api/models"
+	vllmModelsURL = "https://api.github.com/repos/vllm-project/vllm/contents/vllm/model_executor/models"
+	hfAPIURL      = "https://huggingface.co/api/models"
 )
 
 // Discovery handles vLLM model discovery and auto-configuration.
 type Discovery struct {
-	client      *http.Client
-	githubToken string
-	hfToken     string
+	client        *http.Client
+	githubToken   string
+	hfToken       string
+	supportedMu   sync.RWMutex
+	supportedArch map[string]ModelArchitecture
 }
 
 // Option configures the discovery client.
@@ -71,6 +74,16 @@ type HFSibling struct {
 	RFileName string `json:"rfilename"`
 }
 
+// ModelInsight summarizes Hugging Face metadata + vLLM compatibility.
+type ModelInsight struct {
+	HFModel              *HuggingFaceModel `json:"huggingFace"`
+	Compatible           bool              `json:"compatible"`
+	MatchedArchitectures []string          `json:"matchedArchitectures,omitempty"`
+	SuggestedCatalog     *catalog.Model    `json:"suggestedCatalog,omitempty"`
+	RecommendedFiles     []string          `json:"recommendedFiles,omitempty"`
+	Notes                []string          `json:"notes,omitempty"`
+}
+
 // GenerateRequest is a request to generate model configuration.
 type GenerateRequest struct {
 	HFModelID   string `json:"hfModelId" binding:"required"`
@@ -84,6 +97,7 @@ func New(opts ...Option) *Discovery {
 		client: &http.Client{
 			Timeout: 30 * time.Second,
 		},
+		supportedArch: make(map[string]ModelArchitecture),
 	}
 	for _, opt := range opts {
 		opt(d)
@@ -93,6 +107,10 @@ func New(opts ...Option) *Discovery {
 
 // ListSupportedArchitectures returns all vLLM-supported model architectures.
 func (d *Discovery) ListSupportedArchitectures() ([]ModelArchitecture, error) {
+	if archs := d.cachedArchitectures(); archs != nil {
+		return archs, nil
+	}
+
 	req, err := http.NewRequest("GET", vllmModelsURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
@@ -123,25 +141,31 @@ func (d *Discovery) ListSupportedArchitectures() ([]ModelArchitecture, error) {
 		return nil, fmt.Errorf("failed to decode response: %w", err)
 	}
 
-	var architectures []ModelArchitecture
+	architectures := make([]ModelArchitecture, 0, len(files))
+	cache := make(map[string]ModelArchitecture)
 
 	for _, file := range files {
 		if file.Type != "file" || !strings.HasSuffix(file.Name, ".py") {
 			continue
 		}
 
-		// Skip __init__.py and utility files
 		if file.Name == "__init__.py" || strings.HasPrefix(file.Name, "_") {
 			continue
 		}
 
 		name := strings.TrimSuffix(file.Name, ".py")
-		architectures = append(architectures, ModelArchitecture{
+		arch := ModelArchitecture{
 			Name:      name,
 			ClassName: toPascalCase(name),
 			FilePath:  file.Path,
-		})
+		}
+		architectures = append(architectures, arch)
+		cache[strings.ToLower(name)] = arch
 	}
+
+	d.supportedMu.Lock()
+	d.supportedArch = cache
+	d.supportedMu.Unlock()
 
 	return architectures, nil
 }
@@ -183,30 +207,26 @@ func (d *Discovery) GetHuggingFaceModel(modelID string) (*HuggingFaceModel, erro
 
 // GenerateModelConfig generates a model configuration from a HuggingFace model.
 func (d *Discovery) GenerateModelConfig(req GenerateRequest) (*catalog.Model, error) {
-	// Fetch HuggingFace model info
 	hfModel, err := d.GetHuggingFaceModel(req.HFModelID)
 	if err != nil {
 		return nil, err
 	}
+	return d.buildCatalogModel(hfModel, req), nil
+}
 
-	// Generate a clean ID
+func (d *Discovery) buildCatalogModel(hfModel *HuggingFaceModel, req GenerateRequest) *catalog.Model {
 	modelID := generateModelID(req.HFModelID)
 
-	// Use provided display name or generate from model ID
 	displayName := req.DisplayName
 	if displayName == "" {
 		displayName = generateDisplayName(req.HFModelID)
 	}
 
-	// Detect architecture and optimal settings
 	vllmConfig := &catalog.VLLMConfig{}
-
-	// Auto-detect settings from model config if requested
 	if req.AutoDetect && hfModel.Config != nil {
 		vllmConfig = d.detectVLLMSettings(hfModel)
 	}
 
-	// Build model configuration
 	model := &catalog.Model{
 		ID:          modelID,
 		DisplayName: displayName,
@@ -215,7 +235,6 @@ func (d *Discovery) GenerateModelConfig(req GenerateRequest) (*catalog.Model, er
 		VLLM:        vllmConfig,
 	}
 
-	// Add default resource requirements for production
 	model.Resources = &catalog.Resources{
 		Requests: map[string]string{
 			"nvidia.com/gpu": "1",
@@ -225,7 +244,7 @@ func (d *Discovery) GenerateModelConfig(req GenerateRequest) (*catalog.Model, er
 		},
 	}
 
-	return model, nil
+	return model
 }
 
 // detectVLLMSettings attempts to detect optimal vLLM settings from model config.
@@ -256,6 +275,40 @@ func (d *Discovery) detectVLLMSettings(hfModel *HuggingFaceModel) *catalog.VLLMC
 	}
 
 	return config
+}
+
+// DescribeModel returns HuggingFace metadata plus vLLM compatibility info.
+func (d *Discovery) DescribeModel(hfModelID string, autoDetect bool) (*ModelInsight, error) {
+	hfModel, err := d.GetHuggingFaceModel(hfModelID)
+	if err != nil {
+		return nil, err
+	}
+
+	insight := &ModelInsight{
+		HFModel:          hfModel,
+		RecommendedFiles: CollectHuggingFaceFiles(hfModel),
+	}
+
+	supported, err := d.getSupportedArchitectures()
+	if err != nil {
+		insight.Notes = append(insight.Notes, fmt.Sprintf("failed to fetch vLLM supported architectures: %v", err))
+	} else {
+		matched := matchArchitectures(hfModel, supported)
+		if len(matched) > 0 {
+			insight.Compatible = true
+			insight.MatchedArchitectures = matched
+		} else {
+			insight.Notes = append(insight.Notes, "no matching vLLM architecture detected")
+		}
+	}
+
+	req := GenerateRequest{
+		HFModelID:  hfModelID,
+		AutoDetect: autoDetect,
+	}
+	insight.SuggestedCatalog = d.buildCatalogModel(hfModel, req)
+
+	return insight, nil
 }
 
 func requiresTrustRemoteCode(architecture string) bool {
@@ -318,4 +371,115 @@ func toPascalCase(s string) string {
 	}
 
 	return strings.Join(words, "")
+}
+
+func (d *Discovery) cachedArchitectures() []ModelArchitecture {
+	d.supportedMu.RLock()
+	defer d.supportedMu.RUnlock()
+	if len(d.supportedArch) == 0 {
+		return nil
+	}
+	archs := make([]ModelArchitecture, 0, len(d.supportedArch))
+	for _, arch := range d.supportedArch {
+		archs = append(archs, arch)
+	}
+	sort.Slice(archs, func(i, j int) bool {
+		return archs[i].Name < archs[j].Name
+	})
+	return archs
+}
+
+func (d *Discovery) getSupportedArchitectures() (map[string]ModelArchitecture, error) {
+	d.supportedMu.RLock()
+	if len(d.supportedArch) > 0 {
+		defer d.supportedMu.RUnlock()
+		out := make(map[string]ModelArchitecture, len(d.supportedArch))
+		for k, v := range d.supportedArch {
+			out[k] = v
+		}
+		return out, nil
+	}
+	d.supportedMu.RUnlock()
+
+	if _, err := d.ListSupportedArchitectures(); err != nil {
+		return nil, err
+	}
+
+	d.supportedMu.RLock()
+	defer d.supportedMu.RUnlock()
+	out := make(map[string]ModelArchitecture, len(d.supportedArch))
+	for k, v := range d.supportedArch {
+		out[k] = v
+	}
+	return out, nil
+}
+
+// CollectHuggingFaceFiles lists downloadable files for a model.
+func CollectHuggingFaceFiles(model *HuggingFaceModel) []string {
+	files := make([]string, 0, len(model.Siblings))
+	seen := make(map[string]struct{})
+
+	for _, sibling := range model.Siblings {
+		name := sibling.RFileName
+		if name == "" || name == "." {
+			continue
+		}
+		if strings.HasSuffix(name, "/") {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		files = append(files, name)
+	}
+
+	sort.Strings(files)
+	return files
+}
+
+func matchArchitectures(model *HuggingFaceModel, supported map[string]ModelArchitecture) []string {
+	architectures := extractArchitectures(model)
+	if len(architectures) == 0 {
+		return nil
+	}
+
+	found := make(map[string]struct{})
+	for _, arch := range architectures {
+		archLower := strings.ToLower(arch)
+		for key, value := range supported {
+			if strings.Contains(archLower, key) {
+				found[value.Name] = struct{}{}
+			}
+		}
+	}
+
+	if len(found) == 0 {
+		return nil
+	}
+
+	result := make([]string, 0, len(found))
+	for arch := range found {
+		result = append(result, arch)
+	}
+	sort.Strings(result)
+	return result
+}
+
+func extractArchitectures(model *HuggingFaceModel) []string {
+	if model == nil || model.Config == nil {
+		return nil
+	}
+	raw, ok := model.Config["architectures"].([]interface{})
+	if !ok {
+		return nil
+	}
+	var result []string
+	for _, item := range raw {
+		if item == nil {
+			continue
+		}
+		result = append(result, fmt.Sprintf("%v", item))
+	}
+	return result
 }

@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -215,6 +216,39 @@ func TestCreateCatalogPR(t *testing.T) {
 	}
 }
 
+func TestDescribeVLLMModel(t *testing.T) {
+	t.Parallel()
+
+	discovery := &fakeDiscovery{
+		modelInfo: &vllm.ModelInsight{
+			Compatible: true,
+			MatchedArchitectures: []string{"qwen"},
+		},
+	}
+
+	handler := New(nil, nil, nil, discovery, nil, nil, nil, Options{})
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/vllm/model-info", strings.NewReader(`{"hfModelId":"foo/bar"}`))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	handler.DescribeVLLMModel(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 got %d body=%s", w.Code, w.Body.String())
+	}
+
+	var resp map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+
+	if resp["compatible"] != true {
+		t.Fatalf("expected compatible flag: %v", resp["compatible"])
+	}
+}
+
 type fakeWeightStore struct {
 	listResp        []weights.WeightInfo
 	getResp         *weights.WeightInfo
@@ -250,6 +284,7 @@ func (f *fakeWeightStore) InstallFromHuggingFace(ctx context.Context, opts weigh
 type fakeDiscovery struct {
 	hfModel   *vllm.HuggingFaceModel
 	modelResp *catalog.Model
+	modelInfo *vllm.ModelInsight
 }
 
 func (f *fakeDiscovery) ListSupportedArchitectures() ([]vllm.ModelArchitecture, error) {
@@ -279,6 +314,14 @@ func (f *fakeDiscovery) GetHuggingFaceModel(modelID string) (*vllm.HuggingFaceMo
 	model.ID = modelID
 	model.ModelID = modelID
 	return &model, nil
+}
+
+func (f *fakeDiscovery) DescribeModel(id string, auto bool) (*vllm.ModelInsight, error) {
+	if f.modelInfo == nil {
+		return nil, fmt.Errorf("not found")
+	}
+	info := *f.modelInfo
+	return &info, nil
 }
 
 type fakeCatalogWriter struct {
