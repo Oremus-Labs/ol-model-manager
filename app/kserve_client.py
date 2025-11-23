@@ -1,6 +1,6 @@
 """KServe Client - Manages InferenceService resources."""
 import logging
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from kubernetes import client, config
 from kubernetes.client.rest import ApiException
 
@@ -119,6 +119,26 @@ class KServeClient:
         if not storage_uri and model_config.get("hfModelId"):
             storage_uri = f"hf://{model_config['hfModelId']}"
 
+        model_spec: Dict[str, Any] = {
+            "modelFormat": {
+                "name": "custom"
+            },
+            "runtime": model_config.get("runtime", "qwen-vllm-runtime")
+        }
+
+        if storage_uri:
+            model_spec["storageUri"] = storage_uri
+
+        if "env" in model_config:
+            model_spec["env"] = model_config["env"]
+
+        if "storage" in model_config:
+            model_spec["storage"] = model_config["storage"]
+
+        vllm_args = self._build_vllm_args(model_config.get("vllm"))
+        if vllm_args:
+            model_spec["args"] = vllm_args
+
         isvc = {
             "apiVersion": f"{self.group}/{self.version}",
             "kind": "InferenceService",
@@ -133,22 +153,10 @@ class KServeClient:
             "spec": {
                 "predictor": {
                     "minReplicas": 1,
-                    "model": {
-                        "modelFormat": {
-                            "name": "custom"
-                        },
-                        "runtime": model_config.get("runtime", "qwen-vllm-runtime")
-                    }
+                    "model": model_spec
                 }
             }
         }
-
-        if storage_uri:
-            isvc["spec"]["predictor"]["model"]["storageUri"] = storage_uri
-
-        # Attach storage settings when provided so KServe knows which volume to mount.
-        if "storage" in model_config:
-            isvc["spec"]["predictor"]["model"]["storage"] = model_config["storage"]
 
         # Add node selector if provided
         if "nodeSelector" in model_config:
@@ -161,10 +169,7 @@ class KServeClient:
         # Add resources if provided
         if "resources" in model_config:
             isvc["spec"]["predictor"]["model"]["resources"] = model_config["resources"]
-
-        # Apply additional container environment variables if specified
-        if "env" in model_config:
-            isvc["spec"]["predictor"]["model"]["env"] = model_config["env"]
+            isvc["spec"]["predictor"]["resources"] = model_config["resources"]
 
         # Attach extra volume mounts/volumes for persistent storage when explicitly requested.
         if "volumeMounts" in model_config:
@@ -174,3 +179,30 @@ class KServeClient:
             isvc["spec"]["predictor"]["volumes"] = model_config["volumes"]
 
         return isvc
+
+    def _build_vllm_args(self, vllm_config: Optional[Dict[str, Any]]) -> List[str]:
+        """Translate vLLM configuration into CLI args."""
+        if not vllm_config:
+            return []
+
+        flag_map = {
+            "tensorParallelSize": "--tensor-parallel-size",
+            "dtype": "--dtype",
+            "gpuMemoryUtilization": "--gpu-memory-utilization",
+            "maxModelLen": "--max-model-len",
+            "trustRemoteCode": "--trust-remote-code"
+        }
+
+        args: List[str] = []
+        for key, value in vllm_config.items():
+            flag = flag_map.get(key)
+            if not flag or value is None:
+                continue
+
+            if isinstance(value, bool):
+                if value:
+                    args.append(flag)
+            else:
+                args.extend([flag, str(value)])
+
+        return args

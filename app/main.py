@@ -43,6 +43,23 @@ class DeactivateRequest(BaseModel):
     pass
 
 
+@app.post("/refresh")
+async def refresh_catalog():
+    """Force a catalog reload so changes take effect immediately."""
+    logger.info("Manually refreshing model catalog")
+    try:
+        catalog.reload_catalog()
+    except Exception as e:
+        logger.error(f"Failed to refresh catalog: {e}")
+        raise HTTPException(status_code=500, detail="Failed to refresh model catalog")
+
+    return {
+        "status": "success",
+        "message": "Catalog refreshed",
+        "models": catalog.list_models()
+    }
+
+
 @app.on_event("startup")
 async def startup_event():
     """Load catalog on startup."""
