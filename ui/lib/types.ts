@@ -110,3 +110,24 @@ export interface Architecture {
   className?: string;
   description?: string;
 }
+
+export interface HuggingFaceModelMeta {
+  id: string;
+  modelId?: string;
+  author?: string;
+  sha?: string;
+  downloads?: number;
+  likes?: number;
+  tags?: string[];
+  pipelineTag?: string;
+  config?: Record<string, unknown>;
+}
+
+export interface ModelInsight {
+  huggingFace: HuggingFaceModelMeta;
+  compatible: boolean;
+  matchedArchitectures?: string[];
+  suggestedCatalog?: Model;
+  recommendedFiles?: string[];
+  notes?: string[];
+}

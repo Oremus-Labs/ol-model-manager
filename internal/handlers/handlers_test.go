@@ -458,6 +458,46 @@ func TestOpenAPISpecEndpoint(t *testing.T) {
 	}
 }
 
+func TestSearchHuggingFaceParsesFilters(t *testing.T) {
+	t.Parallel()
+
+	discovery := &fakeDiscovery{
+		modelInfo: &vllm.ModelInsight{
+			HFModel: &vllm.HuggingFaceModel{ID: "test/model"},
+		},
+	}
+
+	h := New(nil, nil, nil, discovery, nil, nil, nil, nil, nil, Options{})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/huggingface/search?q=Qwen&limit=5&pipelineTag=text-generation&author=hf&license=apache-2.0&tag=quantized&tags=gguf,ggml&compatibleOnly=true&sort=downloads&direction=desc", nil)
+	c, _ := gin.CreateTestContext(w)
+	c.Request = req
+
+	h.SearchHuggingFace(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 got %d body=%s", w.Code, w.Body.String())
+	}
+
+	opts := discovery.lastSearch
+	if opts.Query != "Qwen" || opts.Limit != 5 {
+		t.Fatalf("unexpected search options: %+v", opts)
+	}
+	if !opts.OnlyCompatible {
+		t.Fatalf("expected compatibleOnly true")
+	}
+	if opts.PipelineTag != "text-generation" || opts.Author != "hf" || opts.License != "apache-2.0" {
+		t.Fatalf("filter mismatch: %+v", opts)
+	}
+	if opts.Sort != "downloads" || opts.Direction != "desc" {
+		t.Fatalf("sort mismatch: %+v", opts)
+	}
+	if len(opts.Tags) != 3 {
+		t.Fatalf("expected tags to be parsed: %+v", opts.Tags)
+	}
+}
+
 type fakeWeightStore struct {
 	listResp        []weights.WeightInfo
 	getResp         *weights.WeightInfo
@@ -495,6 +535,7 @@ type fakeDiscovery struct {
 	modelResp  *catalog.Model
 	modelInfo  *vllm.ModelInsight
 	archDetail *vllm.ArchitectureDetail
+	lastSearch vllm.SearchOptions
 }
 
 func (f *fakeDiscovery) ListSupportedArchitectures() ([]vllm.ModelArchitecture, error) {
@@ -534,7 +575,8 @@ func (f *fakeDiscovery) DescribeModel(id string, auto bool) (*vllm.ModelInsight,
 	return &info, nil
 }
 
-func (f *fakeDiscovery) SearchModels(query string, limit int) ([]*vllm.ModelInsight, error) {
+func (f *fakeDiscovery) SearchModels(opts vllm.SearchOptions) ([]*vllm.ModelInsight, error) {
+	f.lastSearch = opts
 	if f.modelInfo == nil {
 		return []*vllm.ModelInsight{}, nil
 	}

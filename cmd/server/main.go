@@ -95,6 +95,8 @@ func main() {
 	vllmDiscovery := vllm.New(
 		vllm.WithGitHubToken(cfg.GitHubToken),
 		vllm.WithHuggingFaceToken(cfg.HuggingFaceToken),
+		vllm.WithHuggingFaceCacheTTL(cfg.HuggingFaceCacheTTL),
+		vllm.WithVLLMCacheTTL(cfg.VLLMCacheTTL),
 	)
 
 	stateStore, err := store.Open(cfg.DataStoreDSN, cfg.DataStoreDriver)

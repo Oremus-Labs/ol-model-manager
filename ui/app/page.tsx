@@ -1,3 +1,4 @@
+import type { ModelInsight } from '@/lib/types';
 import { SystemOverview } from '@/components/sections/system-overview';
 import { Section } from '@/components/layout/section';
 import { InstallWeightsForm } from '@/components/forms/install-weights-form';
@@ -7,18 +8,39 @@ import { JobsPanel } from '@/components/sections/jobs-panel';
 import { HistoryPanel } from '@/components/sections/history-panel';
 import { VLLMLibrary } from '@/components/sections/vllm-library';
 import { QuickActions } from '@/components/sections/quick-actions';
-import { getArchitectures, getHistory, getJobs, getModels, getSystemInfo, getWeights } from '@/lib/api';
+import { HuggingFaceSearch } from '@/components/sections/hf-search';
+import { getArchitectures, getHistory, getJobs, getModels, getSystemInfo, getWeights, searchHuggingFace } from '@/lib/api';
 
 export const dynamic = 'force-dynamic';
 
-export default async function Page() {
-  const [systemInfo, models, weights, jobs, history, architectures] = await Promise.all([
+type PageProps = {
+  searchParams?: Record<string, string | string[] | undefined>;
+};
+
+const isTruthy = (value: string | string[] | undefined): boolean => {
+  if (!value) return false;
+  const raw = Array.isArray(value) ? value[0] : value;
+  if (!raw) return false;
+  const normalized = raw.toLowerCase();
+  return normalized === '1' || normalized === 'true' || normalized === 'yes' || normalized === 'on';
+};
+
+export default async function Page({ searchParams }: PageProps) {
+  const queryParam = typeof searchParams?.q === 'string' ? searchParams.q : '';
+  const compatibleOnly = isTruthy(searchParams?.compatibleOnly ?? searchParams?.compatible);
+
+  const searchPromise = queryParam
+    ? searchHuggingFace({ query: queryParam, compatibleOnly })
+    : Promise.resolve<ModelInsight[] | null>(null);
+
+  const [systemInfo, models, weights, jobs, history, architectures, searchResults] = await Promise.all([
     getSystemInfo(),
     getModels(),
     getWeights(),
     getJobs(8),
     getHistory(8),
     getArchitectures(),
+    searchPromise,
   ]);
 
   return (
@@ -43,6 +65,14 @@ export default async function Page() {
         id="weights"
       >
         <InstallWeightsForm />
+      </Section>
+
+      <Section
+        title="Hugging Face search"
+        description="Find compatible repos and inspect metadata before staging weights"
+        id="discover"
+      >
+        <HuggingFaceSearch query={queryParam} compatibleOnly={compatibleOnly} results={searchResults} />
       </Section>
 
       <Section title="Catalog entries" description="Generated from the Git-synced model catalog" id="catalog">

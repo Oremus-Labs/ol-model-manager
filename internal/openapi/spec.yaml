@@ -250,6 +250,37 @@ paths:
           schema:
             type: integer
             default: 10
+        - in: query
+          name: pipelineTag
+          schema:
+            type: string
+        - in: query
+          name: author
+          schema:
+            type: string
+        - in: query
+          name: license
+          schema:
+            type: string
+        - in: query
+          name: tag
+          schema:
+            type: array
+            items:
+              type: string
+        - in: query
+          name: sort
+          schema:
+            type: string
+        - in: query
+          name: direction
+          schema:
+            type: string
+            enum: [asc, desc]
+        - in: query
+          name: compatibleOnly
+          schema:
+            type: boolean
       responses:
         '200':
           description: Search results

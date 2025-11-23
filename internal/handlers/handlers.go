@@ -70,7 +70,7 @@ type discoveryService interface {
 	GenerateModelConfig(vllm.GenerateRequest) (*catalog.Model, error)
 	GetHuggingFaceModel(string) (*vllm.HuggingFaceModel, error)
 	DescribeModel(string, bool) (*vllm.ModelInsight, error)
-	SearchModels(string, int) ([]*vllm.ModelInsight, error)
+	SearchModels(vllm.SearchOptions) ([]*vllm.ModelInsight, error)
 }
 
 type catalogValidator interface {
@@ -807,8 +807,19 @@ func (h *Handler) SearchHuggingFace(c *gin.Context) {
 
 	query := c.Query("q")
 	limit := parseLimit(c, "limit", 10, 25)
+	opts := vllm.SearchOptions{
+		Query:          query,
+		Limit:          limit,
+		PipelineTag:    c.Query("pipelineTag"),
+		Author:         c.Query("author"),
+		License:        c.Query("license"),
+		Sort:           c.Query("sort"),
+		Direction:      c.Query("direction"),
+		OnlyCompatible: parseBool(c, "compatibleOnly"),
+		Tags:           parseTags(c),
+	}
 
-	results, err := h.vllm.SearchModels(query, limit)
+	results, err := h.vllm.SearchModels(opts)
 	if err != nil {
 		log.Printf("Failed to search HuggingFace: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -1191,6 +1202,38 @@ func parseLimit(c *gin.Context, key string, def, max int) int {
 		return max
 	}
 	return n
+}
+
+func parseBool(c *gin.Context, key string) bool {
+	val := strings.TrimSpace(strings.ToLower(c.Query(key)))
+	switch val {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+func parseTags(c *gin.Context) []string {
+	values := c.QueryArray("tag")
+	if extra := c.Query("tags"); extra != "" {
+		values = append(values, strings.Split(extra, ",")...)
+	}
+	seen := make(map[string]struct{})
+	tags := make([]string, 0, len(values))
+	for _, tag := range values {
+		tag = strings.TrimSpace(tag)
+		if tag == "" {
+			continue
+		}
+		lower := strings.ToLower(tag)
+		if _, ok := seen[lower]; ok {
+			continue
+		}
+		seen[lower] = struct{}{}
+		tags = append(tags, tag)
+	}
+	return tags
 }
 
 func filterJobs(jobs []store.Job, status, jobType, modelID string) []store.Job {

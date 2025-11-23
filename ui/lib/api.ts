@@ -1,5 +1,5 @@
 import { API_BASE_URL } from './config';
-import type { Architecture, HistoryEntry, Job, Model, SystemInfo, WeightInfo } from './types';
+import type { Architecture, HistoryEntry, Job, Model, ModelInsight, SystemInfo, WeightInfo } from './types';
 
 type JSONValue = Record<string, unknown>;
 
@@ -51,6 +51,19 @@ export async function getHistory(limit = 20): Promise<HistoryEntry[]> {
 export async function getArchitectures(): Promise<Architecture[]> {
   const data = await fetchJSON<{ architectures: Architecture[] }>('/vllm/supported-models');
   return data?.architectures ?? [];
+}
+
+export async function searchHuggingFace(params: { query: string; compatibleOnly?: boolean }): Promise<ModelInsight[]> {
+  if (!params.query) {
+    return [];
+  }
+  const search = new URLSearchParams();
+  search.set('q', params.query);
+  if (params.compatibleOnly) {
+    search.set('compatibleOnly', 'true');
+  }
+  const data = await fetchJSON<{ results: ModelInsight[] }>(`/huggingface/search?${search.toString()}`);
+  return data?.results ?? [];
 }
 
 export async function getCatalogJSON(modelId: string): Promise<JSONValue | null> {
