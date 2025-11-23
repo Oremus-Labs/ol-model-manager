@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -69,9 +70,14 @@ func main() {
 	// Initialize catalog
 	cat := catalog.New(cfg.CatalogRoot, cfg.CatalogModelsDir)
 	if err := cat.Load(); err != nil {
-		log.Fatalf("Failed to load catalog: %v", err)
+		if errors.Is(err, catalog.ErrModelsDirMissing) {
+			log.Printf("Catalog directory not ready yet (git-sync warming up): %v", err)
+		} else {
+			log.Fatalf("Failed to load catalog: %v", err)
+		}
+	} else {
+		log.Printf("Loaded %d models from catalog", cat.Count())
 	}
-	log.Printf("Loaded %d models from catalog", cat.Count())
 
 	// Build Kubernetes clients once so we can share configuration.
 	kubeConfig, err := kube.LoadConfig()
