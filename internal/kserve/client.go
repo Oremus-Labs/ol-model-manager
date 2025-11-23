@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"path"
 	"path/filepath"
 	"strings"
 
@@ -321,11 +320,9 @@ func deriveLocalModelPath(storageURI, inferenceModelRoot string) string {
 		return ""
 	}
 
-	trimmed := strings.TrimPrefix(storageURI, pvcPrefix)
-	parts := strings.SplitN(trimmed, "/", 2)
-	if len(parts) < 2 || parts[1] == "" {
+	if inferenceModelRoot == "" {
 		return ""
 	}
 
-	return path.Join(inferenceModelRoot, parts[1])
+	return inferenceModelRoot
 }
