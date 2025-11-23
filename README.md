@@ -2,6 +2,11 @@
 
 HTTP API service for dynamically managing KServe InferenceServices based on model catalog configurations.
 
+> **Roadmap:** The long-term platform plan (Phases 0–7), schema decisions, and persistence plan
+> now live in [`docs/`](docs). Start with [`docs/roadmap.md`](docs/roadmap.md) for sequencing
+> and [`docs/persistence.md`](docs/persistence.md) for the database design that Phase 1
+> will implement.
+
 ## Features
 
 - List available models from git-synced catalog with automatic refresh caching
@@ -29,13 +34,22 @@ HTTP API service for dynamically managing KServe InferenceServices based on mode
 - `WEIGHTS_PVC_NAME` - Name of the PVC backing the cache (default: `venus-model-storage`)
 - `INFERENCE_MODEL_ROOT` - Path where KServe mounts the PVC inside runtime containers (default: `/mnt/models`)
 - `GPU_PROFILE_PATH` - Optional JSON file describing cluster GPU profiles (default: `/app/config/gpu-profiles.json`)
-- `STATE_PATH` - Directory where the BoltDB state file (jobs/history) is stored (default: `/app/state`)
+- `STATE_PATH` - Directory where the BoltDB/SQLite state file (jobs/history) is stored (default: `/app/state`)
+- `DATASTORE_DRIVER` - Persistence backend (`bolt` today, `sqlite` once Phase 1 ships) (default: `bolt`)
+- `DATASTORE_DSN` - Optional DSN/path override for the persistence layer (defaults to `<STATE_PATH>/state.db` or `model-manager.db` for SQLite)
+- `DATABASE_PVC_NAME` - PVC providing storage for the persistence volume (default: `model-manager-db`)
 - `HUGGINGFACE_API_TOKEN` - Optional token for private HuggingFace models
+- `HUGGINGFACE_CACHE_TTL` - Cache TTL for Hugging Face lookups (default: `5m`)
 - `GITHUB_TOKEN` - Optional token for calling the GitHub API when scraping vLLM metadata
+- `VLLM_CACHE_TTL` - Cache TTL for upstream vLLM scraping (default: `10m`)
+- `RECOMMENDATION_CACHE_TTL` - Cache TTL for recommendation responses (default: `15m`)
 - `CATALOG_REPO` - GitHub repo slug (`owner/repo`) for PR automation (enables `/catalog/pr`)
 - `CATALOG_BASE_BRANCH` - Default base branch for catalog PRs (default: `main`)
 - `GIT_AUTHOR_NAME` / `GIT_AUTHOR_EMAIL` - Identity to use when creating commits in the catalog repo
 - `MODEL_MANAGER_API_TOKEN` - Optional bearer token required for mutating endpoints (activation, installs, PRs)
+- `GPU_INVENTORY_SOURCE` - Source for GPU metadata (`k8s-nodes`, `daemonset`, etc.) used by the recommendation engine (default: `k8s-nodes`)
+- `PVC_ALERT_THRESHOLD` - Utilization threshold (0–1) where alerts/notifications fire (default: `0.85`)
+- `SLACK_WEBHOOK_URL` - Optional webhook used for notifications
 
 ## API Endpoints
 
@@ -77,8 +91,8 @@ HTTP API service for dynamically managing KServe InferenceServices based on mode
 ## Building
 
 ```bash
-docker build -t ghcr.io/oremus-labs/ol-model-manager:0.4.5-go .
-docker push ghcr.io/oremus-labs/ol-model-manager:0.4.5-go
+docker build -t ghcr.io/oremus-labs/ol-model-manager:0.4.6-go .
+docker push ghcr.io/oremus-labs/ol-model-manager:0.4.6-go
 ```
 
 ## Running Locally

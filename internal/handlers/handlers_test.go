@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/oremus-labs/ol-model-manager/internal/catalog"
@@ -312,12 +313,22 @@ func TestSystemInfo(t *testing.T) {
 		statsResp: &weights.StorageStats{ModelCount: 1},
 	}
 	h := New(&catalog.Catalog{}, nil, wm, nil, nil, nil, &fakeAdvisor{}, nil, nil, Options{
-		Version:          "0.0.1",
-		CatalogRoot:      "/catalog",
-		CatalogModelsDir: "models",
-		WeightsPath:      "/mnt/models",
-		StatePath:        "/app/state",
-		AuthEnabled:      true,
+		Version:                "0.0.1",
+		CatalogRoot:            "/catalog",
+		CatalogModelsDir:       "models",
+		WeightsPath:            "/mnt/models",
+		StatePath:              "/app/state",
+		AuthEnabled:            true,
+		DataStoreDriver:        "bolt",
+		DataStoreDSN:           "/app/state/state.db",
+		DatabasePVCName:        "model-manager-db",
+		HuggingFaceCacheTTL:    time.Minute,
+		VLLMCacheTTL:           2 * time.Minute,
+		RecommendationCacheTTL: 3 * time.Minute,
+		SlackWebhookURL:        "https://hooks.slack.invalid",
+		PVCAlertThreshold:      0.9,
+		GPUProfilesPath:        "/app/config/gpu-profiles.json",
+		GPUInventorySource:     "k8s-nodes",
 	})
 
 	w := httptest.NewRecorder()
@@ -335,6 +346,18 @@ func TestSystemInfo(t *testing.T) {
 	}
 	if body["version"] != "0.0.1" {
 		t.Fatalf("expected version in response: %+v", body)
+	}
+	cache, ok := body["cache"].(map[string]interface{})
+	if !ok || cache["catalogTTL"] == "" {
+		t.Fatalf("cache metadata missing: %+v", body["cache"])
+	}
+	persist, ok := body["persistence"].(map[string]interface{})
+	if !ok || persist["driver"] != "bolt" {
+		t.Fatalf("persistence metadata missing: %+v", persist)
+	}
+	notifications, ok := body["notifications"].(map[string]interface{})
+	if !ok || notifications["slackWebhookConfigured"] != true {
+		t.Fatalf("notification metadata missing: %+v", notifications)
 	}
 }
 

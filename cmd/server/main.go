@@ -33,7 +33,7 @@ import (
 )
 
 const (
-	version         = "0.4.5-go"
+	version         = "0.4.6-go"
 	shutdownTimeout = 5 * time.Second
 )
 
@@ -147,19 +147,29 @@ func main() {
 
 	// Initialize handlers
 	h := handlers.New(cat, ksClient, weightManager, vllmDiscovery, catalogValidator, catWriter, advisor, stateStore, jobManager, handlers.Options{
-		CatalogTTL:            cfg.CatalogRefreshInterval,
-		WeightsInstallTimeout: cfg.WeightsInstallTimeout,
-		HuggingFaceToken:      cfg.HuggingFaceToken,
-		GitHubToken:           cfg.GitHubToken,
-		WeightsPVCName:        cfg.WeightsPVCName,
-		InferenceModelRoot:    cfg.InferenceModelRoot,
-		HistoryLimit:          100,
-		Version:               version,
-		CatalogRoot:           cfg.CatalogRoot,
-		CatalogModelsDir:      cfg.CatalogModelsDir,
-		WeightsPath:           cfg.WeightsStoragePath,
-		StatePath:             cfg.StatePath,
-		AuthEnabled:           cfg.APIToken != "",
+		CatalogTTL:             cfg.CatalogRefreshInterval,
+		WeightsInstallTimeout:  cfg.WeightsInstallTimeout,
+		HuggingFaceToken:       cfg.HuggingFaceToken,
+		GitHubToken:            cfg.GitHubToken,
+		WeightsPVCName:         cfg.WeightsPVCName,
+		InferenceModelRoot:     cfg.InferenceModelRoot,
+		HistoryLimit:           100,
+		Version:                version,
+		CatalogRoot:            cfg.CatalogRoot,
+		CatalogModelsDir:       cfg.CatalogModelsDir,
+		WeightsPath:            cfg.WeightsStoragePath,
+		StatePath:              cfg.StatePath,
+		AuthEnabled:            cfg.APIToken != "",
+		HuggingFaceCacheTTL:    cfg.HuggingFaceCacheTTL,
+		VLLMCacheTTL:           cfg.VLLMCacheTTL,
+		RecommendationCacheTTL: cfg.RecommendationCacheTTL,
+		DataStoreDriver:        cfg.DataStoreDriver,
+		DataStoreDSN:           cfg.DataStoreDSN,
+		DatabasePVCName:        cfg.DatabasePVCName,
+		GPUProfilesPath:        cfg.GPUProfilesPath,
+		GPUInventorySource:     cfg.GPUInventorySource,
+		SlackWebhookURL:        cfg.SlackWebhookURL,
+		PVCAlertThreshold:      cfg.PVCAlertThreshold,
 	})
 
 	startWeightMonitor(rootCtx, weightManager)

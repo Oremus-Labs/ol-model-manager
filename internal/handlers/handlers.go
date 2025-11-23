@@ -31,19 +31,29 @@ import (
 
 // Options configures handler runtime behavior.
 type Options struct {
-	CatalogTTL            time.Duration
-	WeightsInstallTimeout time.Duration
-	HuggingFaceToken      string
-	GitHubToken           string
-	WeightsPVCName        string
-	InferenceModelRoot    string
-	HistoryLimit          int
-	Version               string
-	CatalogRoot           string
-	CatalogModelsDir      string
-	WeightsPath           string
-	StatePath             string
-	AuthEnabled           bool
+	CatalogTTL             time.Duration
+	WeightsInstallTimeout  time.Duration
+	HuggingFaceToken       string
+	GitHubToken            string
+	WeightsPVCName         string
+	InferenceModelRoot     string
+	HistoryLimit           int
+	Version                string
+	CatalogRoot            string
+	CatalogModelsDir       string
+	WeightsPath            string
+	StatePath              string
+	AuthEnabled            bool
+	HuggingFaceCacheTTL    time.Duration
+	VLLMCacheTTL           time.Duration
+	RecommendationCacheTTL time.Duration
+	DataStoreDriver        string
+	DataStoreDSN           string
+	DatabasePVCName        string
+	GPUProfilesPath        string
+	GPUInventorySource     string
+	SlackWebhookURL        string
+	PVCAlertThreshold      float64
 }
 
 type weightStore interface {
@@ -117,6 +127,27 @@ func New(cat *catalog.Catalog, ks *kserve.Client, wm weightStore, vdisc discover
 	}
 	if opts.WeightsPath == "" {
 		opts.WeightsPath = opts.InferenceModelRoot
+	}
+	if opts.HuggingFaceCacheTTL <= 0 {
+		opts.HuggingFaceCacheTTL = 5 * time.Minute
+	}
+	if opts.VLLMCacheTTL <= 0 {
+		opts.VLLMCacheTTL = 10 * time.Minute
+	}
+	if opts.RecommendationCacheTTL <= 0 {
+		opts.RecommendationCacheTTL = 15 * time.Minute
+	}
+	if opts.DataStoreDriver == "" {
+		opts.DataStoreDriver = "bolt"
+	}
+	if opts.GPUInventorySource == "" {
+		opts.GPUInventorySource = "k8s-nodes"
+	}
+	if opts.DatabasePVCName == "" {
+		opts.DatabasePVCName = opts.WeightsPVCName
+	}
+	if opts.PVCAlertThreshold <= 0 {
+		opts.PVCAlertThreshold = 0.85
 	}
 
 	if advisor != nil && isNilInterface(advisor) {
@@ -213,6 +244,26 @@ func (h *Handler) SystemInfo(c *gin.Context) {
 		"auth": gin.H{
 			"enabled": h.opts.AuthEnabled,
 		},
+		"persistence": gin.H{
+			"driver":   h.opts.DataStoreDriver,
+			"dsn":      h.opts.DataStoreDSN,
+			"pvcName":  h.opts.DatabasePVCName,
+			"stateDir": h.opts.StatePath,
+		},
+		"cache": gin.H{
+			"catalogTTL":         durationString(h.opts.CatalogTTL),
+			"huggingfaceTTL":     durationString(h.opts.HuggingFaceCacheTTL),
+			"vllmTTL":            durationString(h.opts.VLLMCacheTTL),
+			"recommendationsTTL": durationString(h.opts.RecommendationCacheTTL),
+		},
+		"notifications": gin.H{
+			"slackWebhookConfigured": h.opts.SlackWebhookURL != "",
+			"pvcAlertThreshold":      h.opts.PVCAlertThreshold,
+		},
+		"gpu": gin.H{
+			"profilesPath":    h.opts.GPUProfilesPath,
+			"inventorySource": h.opts.GPUInventorySource,
+		},
 	}
 
 	if h.weights != nil {
@@ -233,6 +284,13 @@ func (h *Handler) SystemInfo(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, info)
+}
+
+func durationString(d time.Duration) string {
+	if d <= 0 {
+		return ""
+	}
+	return d.String()
 }
 
 // OpenAPISpec serves the OpenAPI document.

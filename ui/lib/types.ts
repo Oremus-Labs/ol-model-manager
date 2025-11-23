@@ -17,6 +17,26 @@ export interface SystemInfo {
   auth?: {
     enabled?: boolean;
   };
+  cache?: {
+    catalogTTL?: string;
+    huggingfaceTTL?: string;
+    vllmTTL?: string;
+    recommendationsTTL?: string;
+  };
+  persistence?: {
+    driver?: string;
+    dsn?: string;
+    pvcName?: string;
+    stateDir?: string;
+  };
+  notifications?: {
+    slackWebhookConfigured?: boolean;
+    pvcAlertThreshold?: number;
+  };
+  gpu?: {
+    profilesPath?: string;
+    inventorySource?: string;
+  };
   storage?: WeightStats;
   gpuProfiles?: GPUProfile[];
   recentJobs?: Job[];

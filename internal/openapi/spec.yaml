@@ -490,9 +490,75 @@ components:
           type: string
         catalog:
           type: object
+          additionalProperties: true
         weights:
           type: object
+          properties:
+            path:
+              type: string
+            pvcName:
+              type: string
         state:
           type: object
+          properties:
+            path:
+              type: string
+            enabled:
+              type: boolean
+        auth:
+          type: object
+          properties:
+            enabled:
+              type: boolean
+        cache:
+          type: object
+          properties:
+            catalogTTL:
+              type: string
+              description: Duration string (e.g., 30s, 5m)
+            huggingfaceTTL:
+              type: string
+            vllmTTL:
+              type: string
+            recommendationsTTL:
+              type: string
+        persistence:
+          type: object
+          properties:
+            driver:
+              type: string
+            dsn:
+              type: string
+            pvcName:
+              type: string
+            stateDir:
+              type: string
+        notifications:
+          type: object
+          properties:
+            slackWebhookConfigured:
+              type: boolean
+            pvcAlertThreshold:
+              type: number
+              format: float
+        gpu:
+          type: object
+          properties:
+            profilesPath:
+              type: string
+            inventorySource:
+              type: string
         storage:
           type: object
+        gpuProfiles:
+          type: array
+          items:
+            type: object
+        recentJobs:
+          type: array
+          items:
+            $ref: '#/components/schemas/Job'
+        recentHistory:
+          type: array
+          items:
+            $ref: '#/components/schemas/HistoryEntry'
