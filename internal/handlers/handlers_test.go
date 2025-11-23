@@ -117,6 +117,24 @@ func TestInstallWeightsDerivesFilesFromHuggingFace(t *testing.T) {
 	}
 }
 
+func TestInstallWeightsRejectsInvalidHFID(t *testing.T) {
+	t.Parallel()
+
+	handler := New(nil, nil, &fakeWeightStore{}, &fakeDiscovery{}, Options{})
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	body := strings.NewReader(`{"hfModelId":"bad-id"}`)
+	c.Request = httptest.NewRequest(http.MethodPost, "/weights/install", body)
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	handler.InstallWeights(c)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d body=%s", w.Code, w.Body.String())
+	}
+}
+
 type fakeWeightStore struct {
 	listResp        []weights.WeightInfo
 	getResp         *weights.WeightInfo

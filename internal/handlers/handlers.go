@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"path"
+	"regexp"
 	"sync"
 	"time"
 
@@ -300,9 +301,8 @@ func (h *Handler) InstallWeights(c *gin.Context) {
 		return
 	}
 
-	hfModel, err := h.vllm.GetHuggingFaceModel(req.HFModelID)
+	hfModel, err := h.fetchAndValidateHFModel(req.HFModelID)
 	if err != nil {
-		log.Printf("Failed to inspect HuggingFace model %s: %v", req.HFModelID, err)
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
@@ -427,4 +427,22 @@ func collectHuggingFaceFiles(model *vllm.HuggingFaceModel) []string {
 	}
 
 	return files
+}
+
+var hfModelIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$`)
+
+func (h *Handler) fetchAndValidateHFModel(id string) (*vllm.HuggingFaceModel, error) {
+	if h.vllm == nil {
+		return nil, fmt.Errorf("vLLM discovery client not configured")
+	}
+	if !hfModelIDPattern.MatchString(id) {
+		return nil, fmt.Errorf("invalid Hugging Face model id: %s", id)
+	}
+
+	model, err := h.vllm.GetHuggingFaceModel(id)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch model from Hugging Face: %w", err)
+	}
+
+	return model, nil
 }

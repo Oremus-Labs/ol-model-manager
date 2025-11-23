@@ -20,7 +20,7 @@ import (
 )
 
 const (
-	version         = "0.3.2-go"
+	version         = "0.3.3-go"
 	shutdownTimeout = 5 * time.Second
 )
 
@@ -42,7 +42,7 @@ func main() {
 	log.Printf("Loaded %d models from catalog", cat.Count())
 
 	// Initialize KServe client
-	ksClient, err := kserve.NewClient(cfg.Namespace, cfg.InferenceServiceName)
+	ksClient, err := kserve.NewClient(cfg.Namespace, cfg.InferenceServiceName, cfg.InferenceModelRoot)
 	if err != nil {
 		log.Fatalf("Failed to initialize KServe client: %v", err)
 	}

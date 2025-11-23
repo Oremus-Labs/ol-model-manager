@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 
@@ -27,10 +28,11 @@ const (
 
 // Client manages KServe InferenceServices.
 type Client struct {
-	client       dynamic.Interface
-	namespace    string
-	isvcName     string
-	gvr          schema.GroupVersionResource
+	client             dynamic.Interface
+	namespace          string
+	isvcName           string
+	inferenceModelRoot string
+	gvr                schema.GroupVersionResource
 }
 
 // Result represents an operation result.
@@ -40,7 +42,7 @@ type Result struct {
 }
 
 // NewClient creates a new KServe client.
-func NewClient(namespace, isvcName string) (*Client, error) {
+func NewClient(namespace, isvcName, inferenceModelRoot string) (*Client, error) {
 	config, err := getKubeConfig()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get kubeconfig: %w", err)
@@ -52,9 +54,10 @@ func NewClient(namespace, isvcName string) (*Client, error) {
 	}
 
 	return &Client{
-		client:    dynClient,
-		namespace: namespace,
-		isvcName:  isvcName,
+		client:             dynClient,
+		namespace:          namespace,
+		isvcName:           isvcName,
+		inferenceModelRoot: inferenceModelRoot,
 		gvr: schema.GroupVersionResource{
 			Group:    kserveGroup,
 			Version:  kserveVersion,
@@ -88,7 +91,7 @@ func getKubeConfig() (*rest.Config, error) {
 func (c *Client) Activate(model *catalog.Model) (*Result, error) {
 	log.Printf("Activating model: %s", model.ID)
 
-	isvc := buildInferenceService(c.namespace, c.isvcName, model)
+	isvc := buildInferenceService(c.namespace, c.isvcName, model, c.inferenceModelRoot)
 
 	ctx := context.Background()
 
@@ -147,7 +150,7 @@ func (c *Client) GetActive() (map[string]interface{}, error) {
 	return result.UnstructuredContent(), nil
 }
 
-func buildInferenceService(namespace, name string, model *catalog.Model) *unstructured.Unstructured {
+func buildInferenceService(namespace, name string, model *catalog.Model, inferenceModelRoot string) *unstructured.Unstructured {
 	// Determine storage URI
 	storageURI := model.StorageURI
 	if storageURI == "" && model.HFModelID != "" {
@@ -168,8 +171,9 @@ func buildInferenceService(namespace, name string, model *catalog.Model) *unstru
 		modelSpec["storageUri"] = storageURI
 	}
 
-	if model.Env != nil {
-		modelSpec["env"] = model.Env
+	envVars := prepareEnvVars(model.Env, model.StorageURI, inferenceModelRoot)
+	if envVars != nil {
+		modelSpec["env"] = envVars
 	}
 
 	if model.Storage != nil {
@@ -270,4 +274,58 @@ func defaultString(value, defaultValue string) string {
 		return defaultValue
 	}
 	return value
+}
+
+func prepareEnvVars(env []catalog.EnvVar, storageURI, inferenceModelRoot string) []catalog.EnvVar {
+	if env == nil {
+		env = []catalog.EnvVar{}
+	}
+
+	localPath := deriveLocalModelPath(storageURI, inferenceModelRoot)
+	if localPath == "" {
+		if len(env) == 0 {
+			return nil
+		}
+		return env
+	}
+
+	found := false
+	for i, e := range env {
+		if e.Name != "MODEL_ID" {
+			continue
+		}
+		found = true
+		if strings.HasPrefix(e.Value, "/") {
+			break
+		}
+		env[i].Value = localPath
+		break
+	}
+
+	if !found {
+		env = append(env, catalog.EnvVar{
+			Name:  "MODEL_ID",
+			Value: localPath,
+		})
+	}
+
+	return env
+}
+
+func deriveLocalModelPath(storageURI, inferenceModelRoot string) string {
+	if inferenceModelRoot == "" {
+		return ""
+	}
+	const pvcPrefix = "pvc://"
+	if !strings.HasPrefix(storageURI, pvcPrefix) {
+		return ""
+	}
+
+	trimmed := strings.TrimPrefix(storageURI, pvcPrefix)
+	parts := strings.SplitN(trimmed, "/", 2)
+	if len(parts) < 2 || parts[1] == "" {
+		return ""
+	}
+
+	return path.Join(inferenceModelRoot, parts[1])
 }
