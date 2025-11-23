@@ -1,18 +1,16 @@
 package store
 
 import (
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
-	bolt "go.etcd.io/bbolt"
-)
-
-const (
-	jobBucket     = "jobs"
-	historyBucket = "history"
+	_ "modernc.org/sqlite"
 )
 
 // JobStatus represents asynchronous job state.
@@ -49,152 +47,214 @@ type HistoryEntry struct {
 	CreatedAt time.Time              `json:"createdAt"`
 }
 
-// Store wraps BoltDB for job/state persistence.
+// Store wraps the SQLite database used for persistence.
 type Store struct {
-	db *bolt.DB
+	db *sql.DB
 }
 
-// Open initializes the store at the given directory.
-func Open(stateDir string) (*Store, error) {
-	if err := os.MkdirAll(stateDir, 0o755); err != nil {
-		return nil, fmt.Errorf("failed to create state directory: %w", err)
+// Open initializes the datastore using the supplied DSN/file path and driver.
+func Open(dsn string, driver string) (*Store, error) {
+	if driver == "" {
+		driver = "sqlite"
 	}
-	path := filepath.Join(stateDir, "state.db")
-	db, err := bolt.Open(path, 0o644, &bolt.Options{Timeout: 1 * time.Second})
+	if driver != "sqlite" {
+		return nil, fmt.Errorf("unsupported datastore driver: %s", driver)
+	}
+	if strings.TrimSpace(dsn) == "" {
+		return nil, errors.New("datastore DSN is required")
+	}
+	if err := os.MkdirAll(filepath.Dir(dsn), 0o755); err != nil {
+		return nil, fmt.Errorf("failed to create datastore directory: %w", err)
+	}
+	conn := fmt.Sprintf("file:%s?_busy_timeout=5000&_journal_mode=WAL&_foreign_keys=on", dsn)
+	db, err := sql.Open("sqlite", conn)
 	if err != nil {
-		return nil, fmt.Errorf("failed to open state db: %w", err)
+		return nil, fmt.Errorf("failed to open sqlite datastore: %w", err)
 	}
-
-	if err := db.Update(func(tx *bolt.Tx) error {
-		if _, err := tx.CreateBucketIfNotExists([]byte(jobBucket)); err != nil {
-			return err
-		}
-		if _, err := tx.CreateBucketIfNotExists([]byte(historyBucket)); err != nil {
-			return err
-		}
-		return nil
-	}); err != nil {
+	if err := initSchema(db); err != nil {
+		db.Close()
 		return nil, err
 	}
-
 	return &Store{db: db}, nil
 }
 
-// Close closes the underlying DB.
+func initSchema(db *sql.DB) error {
+	stmts := []string{
+		`PRAGMA journal_mode=WAL;`,
+		`CREATE TABLE IF NOT EXISTS jobs (
+			id TEXT PRIMARY KEY,
+			type TEXT NOT NULL,
+			status TEXT NOT NULL,
+			stage TEXT,
+			progress INTEGER DEFAULT 0,
+			message TEXT,
+			payload TEXT,
+			result TEXT,
+			error TEXT,
+			created_at TIMESTAMP NOT NULL,
+			updated_at TIMESTAMP NOT NULL
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);`,
+		`CREATE INDEX IF NOT EXISTS idx_jobs_type ON jobs(type);`,
+		`CREATE TABLE IF NOT EXISTS history (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			event TEXT NOT NULL,
+			model_id TEXT,
+			metadata TEXT,
+			created_at TIMESTAMP NOT NULL
+		);`,
+	}
+	for _, stmt := range stmts {
+		if _, err := db.Exec(stmt); err != nil {
+			return fmt.Errorf("schema apply failed: %w", err)
+		}
+	}
+	return nil
+}
+
+// Close shuts down the datastore.
 func (s *Store) Close() error {
-	if s.db == nil {
+	if s == nil || s.db == nil {
 		return nil
 	}
 	return s.db.Close()
 }
 
-// CreateJob persists a new job record.
+// CreateJob inserts a new job record.
 func (s *Store) CreateJob(job *Job) error {
-	now := time.Now()
+	if job.ID == "" {
+		return errors.New("job id required")
+	}
+	now := time.Now().UTC()
 	job.CreatedAt = now
 	job.UpdatedAt = now
 	if job.Status == "" {
 		job.Status = JobPending
 	}
-	return s.save(jobBucket, job.ID, job)
+	payload, err := json.Marshal(job.Payload)
+	if err != nil {
+		return err
+	}
+	result, err := json.Marshal(job.Result)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.Exec(`INSERT INTO jobs (id, type, status, stage, progress, message, payload, result, error, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		job.ID, job.Type, job.Status, job.Stage, job.Progress, job.Message, string(payload), string(result), job.Error, job.CreatedAt, job.UpdatedAt,
+	)
+	return err
 }
 
-// UpdateJob updates an existing job.
+// UpdateJob mutates an existing job.
 func (s *Store) UpdateJob(job *Job) error {
-	job.UpdatedAt = time.Now()
-	return s.save(jobBucket, job.ID, job)
+	job.UpdatedAt = time.Now().UTC()
+	payload, err := json.Marshal(job.Payload)
+	if err != nil {
+		return err
+	}
+	result, err := json.Marshal(job.Result)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.Exec(`UPDATE jobs SET type=?, status=?, stage=?, progress=?, message=?, payload=?, result=?, error=?, updated_at=? WHERE id=?`,
+		job.Type, job.Status, job.Stage, job.Progress, job.Message, string(payload), string(result), job.Error, job.UpdatedAt, job.ID,
+	)
+	return err
 }
 
 // GetJob loads a job by ID.
 func (s *Store) GetJob(id string) (*Job, error) {
-	var job Job
-	if err := s.load(jobBucket, id, &job); err != nil {
+	row := s.db.QueryRow(`SELECT id, type, status, stage, progress, message, payload, result, error, created_at, updated_at FROM jobs WHERE id=?`, id)
+	var (
+		job     Job
+		payload sql.NullString
+		result  sql.NullString
+	)
+	if err := row.Scan(&job.ID, &job.Type, &job.Status, &job.Stage, &job.Progress, &job.Message, &payload, &result, &job.Error, &job.CreatedAt, &job.UpdatedAt); err != nil {
 		return nil, err
+	}
+	if payload.Valid {
+		_ = json.Unmarshal([]byte(payload.String), &job.Payload)
+	}
+	if result.Valid {
+		_ = json.Unmarshal([]byte(result.String), &job.Result)
 	}
 	return &job, nil
 }
 
-// ListJobs returns recent jobs (sorted newest -> oldest).
+// ListJobs returns recent jobs sorted from newest to oldest.
 func (s *Store) ListJobs(limit int) ([]Job, error) {
-	var jobs []Job
-	err := s.db.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte(jobBucket))
-		if b == nil {
-			return nil
-		}
-		c := b.Cursor()
-		for k, v := c.Last(); k != nil; k, v = c.Prev() {
-			var job Job
-			if err := json.Unmarshal(v, &job); err != nil {
-				continue
-			}
-			jobs = append(jobs, job)
-			if limit > 0 && len(jobs) >= limit {
-				break
-			}
-		}
-		return nil
-	})
-	return jobs, err
-}
-
-// AppendHistory records a new history entry.
-func (s *Store) AppendHistory(entry *HistoryEntry) error {
-	if entry.ID == "" {
-		entry.ID = fmt.Sprintf("%d", time.Now().UnixNano())
+	query := `SELECT id, type, status, stage, progress, message, payload, result, error, created_at, updated_at FROM jobs ORDER BY created_at DESC`
+	if limit > 0 {
+		query = fmt.Sprintf("%s LIMIT %d", query, limit)
 	}
-	entry.CreatedAt = time.Now()
-	return s.save(historyBucket, entry.ID, entry)
+	rows, err := s.db.Query(query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var jobs []Job
+	for rows.Next() {
+		var j Job
+		var payload, result sql.NullString
+		if err := rows.Scan(&j.ID, &j.Type, &j.Status, &j.Stage, &j.Progress, &j.Message, &payload, &result, &j.Error, &j.CreatedAt, &j.UpdatedAt); err != nil {
+			return nil, err
+		}
+		if payload.Valid {
+			_ = json.Unmarshal([]byte(payload.String), &j.Payload)
+		}
+		if result.Valid {
+			_ = json.Unmarshal([]byte(result.String), &j.Result)
+		}
+		jobs = append(jobs, j)
+	}
+	return jobs, rows.Err()
 }
 
-// ListHistory returns newest history entries (limit optional).
-func (s *Store) ListHistory(limit int) ([]HistoryEntry, error) {
-	var entries []HistoryEntry
-	err := s.db.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte(historyBucket))
-		if b == nil {
-			return nil
-		}
-		c := b.Cursor()
-		for k, v := c.Last(); k != nil; k, v = c.Prev() {
-			var entry HistoryEntry
-			if err := json.Unmarshal(v, &entry); err != nil {
-				continue
-			}
-			entries = append(entries, entry)
-			if limit > 0 && len(entries) >= limit {
-				break
-			}
-		}
-		return nil
-	})
-	return entries, err
-}
-
-func (s *Store) save(bucket string, key string, value interface{}) error {
-	data, err := json.Marshal(value)
+// AppendHistory writes an entry to the history log.
+func (s *Store) AppendHistory(entry *HistoryEntry) error {
+	entry.CreatedAt = time.Now().UTC()
+	metadata, err := json.Marshal(entry.Metadata)
 	if err != nil {
 		return err
 	}
-	return s.db.Update(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte(bucket))
-		if b == nil {
-			return fmt.Errorf("bucket %s not found", bucket)
-		}
-		return b.Put([]byte(key), data)
-	})
+	res, err := s.db.Exec(`INSERT INTO history (event, model_id, metadata, created_at) VALUES (?, ?, ?, ?)`,
+		entry.Event, entry.ModelID, string(metadata), entry.CreatedAt,
+	)
+	if err != nil {
+		return err
+	}
+	if id, err := res.LastInsertId(); err == nil {
+		entry.ID = fmt.Sprintf("%d", id)
+	}
+	return nil
 }
 
-func (s *Store) load(bucket, key string, out interface{}) error {
-	return s.db.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte(bucket))
-		if b == nil {
-			return fmt.Errorf("bucket %s not found", bucket)
+// ListHistory returns the newest history entries.
+func (s *Store) ListHistory(limit int) ([]HistoryEntry, error) {
+	query := `SELECT id, event, model_id, metadata, created_at FROM history ORDER BY id DESC`
+	if limit > 0 {
+		query = fmt.Sprintf("%s LIMIT %d", query, limit)
+	}
+	rows, err := s.db.Query(query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var entries []HistoryEntry
+	for rows.Next() {
+		var e HistoryEntry
+		var metadata sql.NullString
+		var id int64
+		if err := rows.Scan(&id, &e.Event, &e.ModelID, &metadata, &e.CreatedAt); err != nil {
+			return nil, err
 		}
-		value := b.Get([]byte(key))
-		if value == nil {
-			return fmt.Errorf("record not found")
+		e.ID = fmt.Sprintf("%d", id)
+		if metadata.Valid {
+			_ = json.Unmarshal([]byte(metadata.String), &e.Metadata)
 		}
-		return json.Unmarshal(value, out)
-	})
+		entries = append(entries, e)
+	}
+	return entries, rows.Err()
 }

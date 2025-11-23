@@ -17,7 +17,7 @@ HTTP API service for dynamically managing KServe InferenceServices based on mode
 - Search the Hugging Face Hub for vLLM-compatible models and inspect metadata before installing
 - Publish a live OpenAPI spec + Swagger UI so UI/automation teams can self-discover endpoints
 - Query PVC usage statistics and supported vLLM architectures
-- Persist deployment history + job status via an embedded BoltDB store (backed by a PVC)
+- Persist deployment history + job status via an embedded SQLite datastore (backed by a PVC)
 - Validate catalog entries against the shared schema, PVC/secret availability, and GPU capacity
 - Dry-run KServe activations (and optional readiness probes) before flipping production traffic
 - Estimate GPU compatibility + runtime recommendations per catalog entry, with GPU profile metadata exposed to the UI
@@ -36,7 +36,7 @@ HTTP API service for dynamically managing KServe InferenceServices based on mode
 - `GPU_PROFILE_PATH` - Optional JSON file describing cluster GPU profiles (default: `/app/config/gpu-profiles.json`)
 - `STATE_PATH` - Directory where the BoltDB/SQLite state file (jobs/history) is stored (default: `/app/state`)
 - `DATASTORE_DRIVER` - Persistence backend (`bolt` today, `sqlite` once Phase 1 ships) (default: `bolt`)
-- `DATASTORE_DSN` - Optional DSN/path override for the persistence layer (defaults to `<STATE_PATH>/state.db` or `model-manager.db` for SQLite)
+- `DATASTORE_DSN` - Optional DSN/path override for the persistence layer (defaults to `<STATE_PATH>/model-manager.db`)
 - `DATABASE_PVC_NAME` - PVC providing storage for the persistence volume (default: `model-manager-db`)
 - `HUGGINGFACE_API_TOKEN` - Optional token for private HuggingFace models
 - `HUGGINGFACE_CACHE_TTL` - Cache TTL for Hugging Face lookups (default: `5m`)
@@ -91,8 +91,8 @@ HTTP API service for dynamically managing KServe InferenceServices based on mode
 ## Building
 
 ```bash
-docker build -t ghcr.io/oremus-labs/ol-model-manager:0.4.6-go .
-docker push ghcr.io/oremus-labs/ol-model-manager:0.4.6-go
+docker build -t ghcr.io/oremus-labs/ol-model-manager:0.4.7-go .
+docker push ghcr.io/oremus-labs/ol-model-manager:0.4.7-go
 ```
 
 ## Running Locally

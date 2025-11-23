@@ -3,6 +3,7 @@ package jobs
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -71,7 +72,8 @@ func TestManagerEnqueueWeightInstallFailure(t *testing.T) {
 func openTestStore(t *testing.T) *store.Store {
 	t.Helper()
 	dir := t.TempDir()
-	s, err := store.Open(dir)
+	dsn := filepath.Join(dir, "state.db")
+	s, err := store.Open(dsn, "sqlite")
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)
 	}

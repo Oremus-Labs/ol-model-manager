@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -605,7 +606,8 @@ func (f *fakeAdvisor) Profiles() []recommendations.GPUProfile {
 func newTempStore(t *testing.T) *store.Store {
 	t.Helper()
 	dir := t.TempDir()
-	s, err := store.Open(dir)
+	dsn := filepath.Join(dir, "state.db")
+	s, err := store.Open(dsn, "sqlite")
 	if err != nil {
 		t.Fatalf("failed opening store: %v", err)
 	}

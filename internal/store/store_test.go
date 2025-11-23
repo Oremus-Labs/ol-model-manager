@@ -9,7 +9,8 @@ func TestStoreJobsAndHistory(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
-	s, err := Open(dir)
+	dsn := filepath.Join(dir, "state.db")
+	s, err := Open(dsn, "sqlite")
 	if err != nil {
 		t.Fatalf("failed to open store: %v", err)
 	}
@@ -63,9 +64,9 @@ func TestOpenCreatesDirectory(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
-	path := filepath.Join(dir, "nested")
+	path := filepath.Join(dir, "nested", "state.db")
 
-	s, err := Open(path)
+	s, err := Open(path, "sqlite")
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}

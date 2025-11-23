@@ -33,7 +33,7 @@ import (
 )
 
 const (
-	version         = "0.4.6-go"
+	version         = "0.4.7-go"
 	shutdownTimeout = 5 * time.Second
 )
 
@@ -97,7 +97,7 @@ func main() {
 		vllm.WithHuggingFaceToken(cfg.HuggingFaceToken),
 	)
 
-	stateStore, err := store.Open(cfg.StatePath)
+	stateStore, err := store.Open(cfg.DataStoreDSN, cfg.DataStoreDriver)
 	if err != nil {
 		log.Fatalf("Failed to initialize state store: %v", err)
 	}
