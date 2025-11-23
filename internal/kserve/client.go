@@ -278,6 +278,10 @@ func defaultString(value, defaultValue string) string {
 func prepareEnvVars(env []catalog.EnvVar, storageURI, inferenceModelRoot string) []catalog.EnvVar {
 	if env == nil {
 		env = []catalog.EnvVar{}
+	} else {
+		copied := make([]catalog.EnvVar, len(env))
+		copy(copied, env)
+		env = copied
 	}
 
 	localPath := deriveLocalModelPath(storageURI, inferenceModelRoot)
