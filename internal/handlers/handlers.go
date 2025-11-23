@@ -4,6 +4,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -220,6 +221,10 @@ func (h *Handler) Health(c *gin.Context) {
 
 // SystemInfo exposes metadata for UI bootstrapping.
 func (h *Handler) SystemInfo(c *gin.Context) {
+	if err := h.ensureCatalogFresh(false); err != nil {
+		log.Printf("system info catalog refresh failed: %v", err)
+	}
+
 	catalogInfo := gin.H{
 		"root":        h.opts.CatalogRoot,
 		"modelsDir":   h.opts.CatalogModelsDir,
@@ -1115,6 +1120,11 @@ func (h *Handler) ensureCatalogFresh(force bool) error {
 
 	if force || h.lastCatalogRefresh.IsZero() || time.Since(h.lastCatalogRefresh) > h.opts.CatalogTTL {
 		if err := h.catalog.Reload(); err != nil {
+			if errors.Is(err, catalog.ErrModelsDirMissing) {
+				log.Printf("Catalog directory not ready yet: %v", err)
+				h.lastCatalogRefresh = time.Time{}
+				return nil
+			}
 			return err
 		}
 		h.lastCatalogRefresh = time.Now()

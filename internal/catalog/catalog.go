@@ -3,6 +3,7 @@ package catalog
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -10,12 +11,15 @@ import (
 	"sync"
 )
 
+// ErrModelsDirMissing indicates the catalog models directory hasn't been synced yet.
+var ErrModelsDirMissing = errors.New("catalog models directory missing")
+
 // Catalog manages model configurations.
 type Catalog struct {
-	catalogRoot  string
-	modelsDir    string
-	models       map[string]*Model
-	mu           sync.RWMutex
+	catalogRoot string
+	modelsDir   string
+	models      map[string]*Model
+	mu          sync.RWMutex
 }
 
 // New creates a new Catalog instance.
@@ -33,7 +37,7 @@ func (c *Catalog) Load() error {
 
 	if _, err := os.Stat(modelsPath); os.IsNotExist(err) {
 		log.Printf("Models directory does not exist: %s", modelsPath)
-		return nil
+		return ErrModelsDirMissing
 	}
 
 	log.Printf("Loading models from: %s", modelsPath)
