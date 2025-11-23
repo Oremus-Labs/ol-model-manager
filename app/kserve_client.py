@@ -115,8 +115,11 @@ class KServeClient:
             "runtime": model_config.get("runtime", "vllm-runtime")
         }
 
+        pvc_storage = False
         if storage_uri:
             model_spec["storageUri"] = storage_uri
+            if storage_uri.startswith("pvc://"):
+                pvc_storage = True
 
         if "env" in model_config:
             model_spec["env"] = model_config["env"]
@@ -159,6 +162,9 @@ class KServeClient:
         if "resources" in model_config:
             isvc["spec"]["predictor"]["model"]["resources"] = model_config["resources"]
             isvc["spec"]["predictor"]["resources"] = model_config["resources"]
+
+        if pvc_storage:
+            isvc["metadata"]["annotations"]["storage.kserve.io/readonly"] = "false"
 
         # Attach extra volume mounts/volumes for persistent storage when explicitly requested.
         if "volumeMounts" in model_config:
