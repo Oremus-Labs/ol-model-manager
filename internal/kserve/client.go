@@ -120,6 +120,11 @@ func (c *Client) DryRun(model *catalog.Model) (*DryRunResult, error) {
 	if err != nil {
 		if apierrors.IsAlreadyExists(err) {
 			action = "update"
+			existing, getErr := c.client.Resource(c.gvr).Namespace(c.namespace).Get(ctx, c.isvcName, metav1.GetOptions{})
+			if getErr != nil {
+				return nil, fmt.Errorf("failed to fetch existing InferenceService: %w", getErr)
+			}
+			isvc.SetResourceVersion(existing.GetResourceVersion())
 			_, err = c.client.Resource(c.gvr).Namespace(c.namespace).Update(ctx, isvc.DeepCopy(), metav1.UpdateOptions{
 				DryRun: []string{metav1.DryRunAll},
 			})
@@ -207,29 +212,12 @@ func buildInferenceService(namespace, name string, model *catalog.Model, inferen
 		modelSpec["args"] = vllmArgs
 	}
 
-	// Build InferenceService manifest
-	isvc := &unstructured.Unstructured{
-		Object: map[string]interface{}{
-			"apiVersion": kserveGroup + "/" + kserveVersion,
-			"kind":       "InferenceService",
-			"metadata": map[string]interface{}{
-				"name":      name,
-				"namespace": namespace,
-				"annotations": map[string]interface{}{
-					"serving.kserve.io/secretName": "hf-token",
-					"model-manager/model-id":       model.ID,
-				},
-			},
-			"spec": map[string]interface{}{
-				"predictor": map[string]interface{}{
-					"minReplicas": 1,
-					"model":       modelSpec,
-				},
-			},
-		},
-	}
+	modelSpec = ensureJSONObject(modelSpec)
 
-	predictor := isvc.Object["spec"].(map[string]interface{})["predictor"].(map[string]interface{})
+	predictor := map[string]interface{}{
+		"minReplicas": int64(1),
+		"model":       modelSpec,
+	}
 
 	// Add optional configurations
 	if model.NodeSelector != nil {
@@ -249,11 +237,6 @@ func buildInferenceService(namespace, name string, model *catalog.Model, inferen
 		}
 	}
 
-	if pvcStorage {
-		annotations := isvc.Object["metadata"].(map[string]interface{})["annotations"].(map[string]interface{})
-		annotations["storage.kserve.io/readonly"] = "false"
-	}
-
 	if model.VolumeMounts != nil {
 		if converted := jsonCompatible(model.VolumeMounts); converted != nil {
 			modelSpec["volumeMounts"] = converted
@@ -264,6 +247,33 @@ func buildInferenceService(namespace, name string, model *catalog.Model, inferen
 		if converted := jsonCompatible(model.Volumes); converted != nil {
 			predictor["volumes"] = converted
 		}
+	}
+
+	predictor = ensureJSONObject(predictor)
+
+	annotations := map[string]interface{}{
+		"serving.kserve.io/secretName": "hf-token",
+		"model-manager/model-id":       model.ID,
+	}
+	if pvcStorage {
+		annotations["storage.kserve.io/readonly"] = "false"
+	}
+
+	spec := map[string]interface{}{
+		"predictor": predictor,
+	}
+
+	isvc := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": kserveGroup + "/" + kserveVersion,
+			"kind":       "InferenceService",
+			"metadata": map[string]interface{}{
+				"name":        name,
+				"namespace":   namespace,
+				"annotations": annotations,
+			},
+			"spec": spec,
+		},
 	}
 
 	return isvc
@@ -411,4 +421,14 @@ func jsonCompatible(value interface{}) interface{} {
 		return nil
 	}
 	return out
+}
+
+func ensureJSONObject(src map[string]interface{}) map[string]interface{} {
+	if src == nil {
+		return nil
+	}
+	if converted, ok := jsonCompatible(src).(map[string]interface{}); ok && converted != nil {
+		return converted
+	}
+	return src
 }
