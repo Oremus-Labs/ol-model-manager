@@ -13,10 +13,12 @@ COPY go.mod go.sum* ./
 RUN go mod download
 
 # Copy source code
-COPY main.go handlers.go catalog.go kserve.go ./
+COPY cmd/ ./cmd/
+COPY config/ ./config/
+COPY internal/ ./internal/
 
 # Build the binary
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -ldflags="-w -s" -o model-manager .
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -ldflags="-w -s" -o model-manager ./cmd/server
 
 # Final stage
 FROM alpine:latest
