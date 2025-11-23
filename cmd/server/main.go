@@ -33,7 +33,7 @@ import (
 )
 
 const (
-	version         = "0.4.4-go"
+	version         = "0.4.5-go"
 	shutdownTimeout = 5 * time.Second
 )
 
@@ -210,6 +210,8 @@ func setupRouter(h *handlers.Handler, apiToken string) *gin.Engine {
 	// Health check
 	router.GET("/healthz", h.Health)
 	router.GET("/system/info", h.SystemInfo)
+	router.GET("/openapi", h.OpenAPISpec)
+	router.GET("/docs", h.APIDocs)
 	router.GET("/metrics", gin.WrapH(promhttp.Handler()))
 
 	// Model endpoints
@@ -248,6 +250,7 @@ func setupRouter(h *handlers.Handler, apiToken string) *gin.Engine {
 	protected.POST("/catalog/pr", h.CreateCatalogPR)
 	protected.POST("/weights/install", h.InstallWeights)
 	protected.DELETE("/weights/:name", h.DeleteWeights)
+	protected.GET("/weights/install/status/:id", h.GetJob)
 	protected.GET("/jobs", h.ListJobs)
 	protected.GET("/jobs/:id", h.GetJob)
 	protected.GET("/history", h.ListHistory)

@@ -1,0 +1,498 @@
+openapi: 3.0.3
+info:
+  title: OL Model Manager API
+  version: 0.4.5
+  description: HTTP API for managing KServe models, cached weights, and catalog automation.
+servers:
+  - url: /
+paths:
+  /healthz:
+    get:
+      summary: Health check
+      responses:
+        '200':
+          description: Service is healthy
+  /system/info:
+    get:
+      summary: System overview for UI dashboards
+      responses:
+        '200':
+          description: System information payload
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SystemInfo'
+  /openapi:
+    get:
+      summary: OpenAPI specification in JSON
+      responses:
+        '200':
+          description: OpenAPI JSON
+  /docs:
+    get:
+      summary: Swagger UI
+      responses:
+        '200':
+          description: HTML documentation
+          content:
+            text/html: {}
+  /models:
+    get:
+      summary: List models from catalog
+      responses:
+        '200':
+          description: Array of models
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Model'
+  /models/{id}:
+    get:
+      summary: Retrieve a model
+      parameters:
+        - $ref: '#/components/parameters/ModelID'
+      responses:
+        '200':
+          description: Catalog entry
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Model'
+        '404':
+          description: Model not found
+  /models/{id}/manifest:
+    get:
+      summary: Render the KServe manifest for a model
+      parameters:
+        - $ref: '#/components/parameters/ModelID'
+      responses:
+        '200':
+          description: Manifest + model
+  /models/{id}/compatibility:
+    get:
+      summary: GPU compatibility report
+      parameters:
+        - $ref: '#/components/parameters/ModelID'
+        - in: query
+          name: gpuType
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Compatibility information
+  /models/activate:
+    post:
+      summary: Activate a catalog model
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                id:
+                  type: string
+              required: [id]
+      responses:
+        '200':
+          description: Activation result
+  /models/deactivate:
+    post:
+      summary: Deactivate the active model
+      security:
+        - ApiKeyAuth: []
+      responses:
+        '200':
+          description: Deactivation result
+  /models/test:
+    post:
+      summary: Dry-run a manifest and optional readiness probe
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                id:
+                  type: string
+                readinessUrl:
+                  type: string
+      responses:
+        '200':
+          description: Dry-run response
+  /catalog/generate:
+    post:
+      summary: Generate a catalog entry from Hugging Face metadata
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                hfModelId:
+                  type: string
+                storageUri:
+                  type: string
+      responses:
+        '200':
+          description: Draft catalog entry
+  /catalog/validate:
+    post:
+      summary: Validate model JSON
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Model'
+      responses:
+        '200':
+          description: Validation result
+  /catalog/pr:
+    post:
+      summary: Save catalog entry and open a PR
+      security:
+        - ApiKeyAuth: []
+      responses:
+        '200':
+          description: PR status
+  /catalog/preview:
+    post:
+      summary: Preview manifest for adhoc catalog entry
+      security:
+        - ApiKeyAuth: []
+      responses:
+        '200':
+          description: Manifest preview
+  /refresh:
+    post:
+      summary: Force catalog reload
+      security:
+        - ApiKeyAuth: []
+      responses:
+        '200':
+          description: Reloaded catalog
+  /weights:
+    get:
+      summary: List cached weights
+      responses:
+        '200':
+          description: Weight directories
+  /weights/usage:
+    get:
+      summary: PVC usage statistics
+      responses:
+        '200':
+          description: Usage metrics
+  /weights/{name}/info:
+    get:
+      summary: Weight directory info
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Weight info
+        '404':
+          description: Not found
+  /weights/install:
+    post:
+      summary: Install weights from Hugging Face
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InstallWeightsRequest'
+      responses:
+        '202':
+          description: Async job queued
+        '200':
+          description: Immediate install (when async disabled)
+  /weights/{name}:
+    delete:
+      summary: Delete cached weights
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Deletion status
+  /huggingface/search:
+    get:
+      summary: Search Hugging Face Hub (vLLM filtered)
+      parameters:
+        - in: query
+          name: q
+          schema:
+            type: string
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            default: 10
+      responses:
+        '200':
+          description: Search results
+  /huggingface/models/{id}:
+    get:
+      summary: Describe a Hugging Face model
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - in: query
+          name: autoDetect
+          schema:
+            type: boolean
+      responses:
+        '200':
+          description: Model insight
+  /vllm/supported-models:
+    get:
+      summary: List supported vLLM architectures
+      responses:
+        '200':
+          description: Architecture list
+  /vllm/model/{architecture}:
+    get:
+      summary: Inspect vLLM architecture template
+      parameters:
+        - name: architecture
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Architecture detail
+  /vllm/discover:
+    post:
+      summary: Generate catalog config via vLLM discovery
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                hfModelId:
+                  type: string
+      responses:
+        '200':
+          description: Catalog model
+  /vllm/model-info:
+    post:
+      summary: Describe a Hugging Face model + compatibility
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                hfModelId:
+                  type: string
+                  description: Hugging Face repository ID
+      responses:
+        '200':
+          description: Insight payload
+  /jobs:
+    get:
+      summary: List asynchronous jobs
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+        - name: status
+          in: query
+          schema:
+            type: string
+        - name: type
+          in: query
+          schema:
+            type: string
+        - name: modelId
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Jobs
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  jobs:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Job'
+  /jobs/{id}:
+    get:
+      summary: Get job status/progress
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Job record
+  /history:
+    get:
+      summary: Historical install/activation events
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+        - name: event
+          in: query
+          schema:
+            type: string
+        - name: modelId
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          description: History entries
+  /weights/install/status/{id}:
+    get:
+      summary: Convenience endpoint for job status (alias of /jobs/{id})
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Job record
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: Authorization
+  parameters:
+    ModelID:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+  schemas:
+    Job:
+      type: object
+      properties:
+        id:
+          type: string
+        type:
+          type: string
+        status:
+          type: string
+          enum: [pending, running, completed, failed]
+        stage:
+          type: string
+        progress:
+          type: integer
+          format: int32
+        message:
+          type: string
+        payload:
+          type: object
+        result:
+          type: object
+        error:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    HistoryEntry:
+      type: object
+      properties:
+        id:
+          type: string
+        event:
+          type: string
+        modelId:
+          type: string
+        metadata:
+          type: object
+        createdAt:
+          type: string
+          format: date-time
+    InstallWeightsRequest:
+      type: object
+      required: [hfModelId]
+      properties:
+        hfModelId:
+          type: string
+        revision:
+          type: string
+        target:
+          type: string
+        files:
+          type: array
+          items:
+            type: string
+        overwrite:
+          type: boolean
+    Model:
+      type: object
+      properties:
+        id:
+          type: string
+        displayName:
+          type: string
+        hfModelId:
+          type: string
+        runtime:
+          type: string
+        storageUri:
+          type: string
+        vllm:
+          type: object
+        resources:
+          type: object
+    SystemInfo:
+      type: object
+      properties:
+        version:
+          type: string
+        catalog:
+          type: object
+        weights:
+          type: object
+        state:
+          type: object
+        storage:
+          type: object

@@ -21,6 +21,7 @@ import (
 	"github.com/oremus-labs/ol-model-manager/internal/catalogwriter"
 	"github.com/oremus-labs/ol-model-manager/internal/jobs"
 	"github.com/oremus-labs/ol-model-manager/internal/kserve"
+	"github.com/oremus-labs/ol-model-manager/internal/openapi"
 	"github.com/oremus-labs/ol-model-manager/internal/recommendations"
 	"github.com/oremus-labs/ol-model-manager/internal/store"
 	"github.com/oremus-labs/ol-model-manager/internal/validator"
@@ -232,6 +233,21 @@ func (h *Handler) SystemInfo(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, info)
+}
+
+// OpenAPISpec serves the OpenAPI document.
+func (h *Handler) OpenAPISpec(c *gin.Context) {
+	data, err := openapi.JSON()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to serialize OpenAPI document"})
+		return
+	}
+	c.Data(http.StatusOK, "application/json", data)
+}
+
+// APIDocs serves a lightweight Swagger UI wrapper.
+func (h *Handler) APIDocs(c *gin.Context) {
+	c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(docsHTML))
 }
 
 // ListModels returns all available models.
@@ -553,7 +569,12 @@ func (h *Handler) InstallWeights(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
-		c.JSON(http.StatusAccepted, gin.H{"status": "queued", "job": job})
+		c.JSON(http.StatusAccepted, gin.H{
+			"status":               "queued",
+			"job":                  job,
+			"jobUrl":               fmt.Sprintf("/jobs/%s", job.ID),
+			"weightsInstallStatus": fmt.Sprintf("/weights/install/status/%s", job.ID),
+		})
 		return
 	}
 
@@ -938,6 +959,7 @@ func (h *Handler) ListJobs(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+	jobs = filterJobs(jobs, c.Query("status"), c.Query("type"), c.Query("modelId"))
 	c.JSON(http.StatusOK, gin.H{"jobs": jobs})
 }
 
@@ -968,6 +990,7 @@ func (h *Handler) ListHistory(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+	entries = filterHistory(entries, c.Query("event"), c.Query("modelId"))
 	c.JSON(http.StatusOK, gin.H{"events": entries})
 }
 
@@ -1112,6 +1135,51 @@ func parseLimit(c *gin.Context, key string, def, max int) int {
 	return n
 }
 
+func filterJobs(jobs []store.Job, status, jobType, modelID string) []store.Job {
+	status = strings.TrimSpace(strings.ToLower(status))
+	jobType = strings.TrimSpace(strings.ToLower(jobType))
+	modelID = strings.TrimSpace(strings.ToLower(modelID))
+	if status == "" && jobType == "" && modelID == "" {
+		return jobs
+	}
+	result := make([]store.Job, 0, len(jobs))
+	for _, job := range jobs {
+		if status != "" && strings.ToLower(string(job.Status)) != status {
+			continue
+		}
+		if jobType != "" && strings.ToLower(job.Type) != jobType {
+			continue
+		}
+		if modelID != "" {
+			payloadID, _ := job.Payload["hfModelId"].(string)
+			if strings.ToLower(payloadID) != modelID {
+				continue
+			}
+		}
+		result = append(result, job)
+	}
+	return result
+}
+
+func filterHistory(entries []store.HistoryEntry, event, modelID string) []store.HistoryEntry {
+	event = strings.TrimSpace(strings.ToLower(event))
+	modelID = strings.TrimSpace(strings.ToLower(modelID))
+	if event == "" && modelID == "" {
+		return entries
+	}
+	result := make([]store.HistoryEntry, 0, len(entries))
+	for _, entry := range entries {
+		if event != "" && strings.ToLower(entry.Event) != event {
+			continue
+		}
+		if modelID != "" && strings.ToLower(entry.ModelID) != modelID {
+			continue
+		}
+		result = append(result, entry)
+	}
+	return result
+}
+
 func isNilInterface(value interface{}) bool {
 	val := reflect.ValueOf(value)
 	switch val.Kind() {
@@ -1121,6 +1189,30 @@ func isNilInterface(value interface{}) bool {
 		return false
 	}
 }
+
+const docsHTML = `<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8"/>
+    <title>OL Model Manager API</title>
+    <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css" />
+    <style>body{margin:0;padding:0;}#swagger-ui{height:100vh;}</style>
+  </head>
+  <body>
+    <div id="swagger-ui"></div>
+    <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+    <script>
+      window.onload = () => {
+        window.ui = SwaggerUIBundle({
+          url: '/openapi',
+          dom_id: '#swagger-ui',
+          presets: [SwaggerUIBundle.presets.apis],
+          layout: 'BaseLayout'
+        });
+      };
+    </script>
+  </body>
+</html>`
 
 var hfModelIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$`)
 

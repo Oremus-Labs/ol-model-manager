@@ -30,6 +30,9 @@ type Job struct {
 	ID        string                 `json:"id"`
 	Type      string                 `json:"type"`
 	Status    JobStatus              `json:"status"`
+	Stage     string                 `json:"stage,omitempty"`
+	Progress  int                    `json:"progress,omitempty"`
+	Message   string                 `json:"message,omitempty"`
 	Payload   map[string]interface{} `json:"payload,omitempty"`
 	Result    map[string]interface{} `json:"result,omitempty"`
 	Error     string                 `json:"error,omitempty"`

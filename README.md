@@ -10,6 +10,7 @@ HTTP API service for dynamically managing KServe InferenceServices based on mode
 - Install new model weights directly from HuggingFace (with optional auth token) with async job tracking
 - Generate draft catalog entries from HuggingFace metadata via vLLM discovery helpers and manifest previews
 - Search the Hugging Face Hub for vLLM-compatible models and inspect metadata before installing
+- Publish a live OpenAPI spec + Swagger UI so UI/automation teams can self-discover endpoints
 - Query PVC usage statistics and supported vLLM architectures
 - Persist deployment history + job status via an embedded BoltDB store (backed by a PVC)
 - Validate catalog entries against the shared schema, PVC/secret availability, and GPU capacity
@@ -40,6 +41,7 @@ HTTP API service for dynamically managing KServe InferenceServices based on mode
 
 - `GET /healthz` - Health check
 - `GET /system/info` - Service metadata (version, catalog counts, PVC paths, GPU profiles, recent jobs/history)
+- `GET /openapi` / `GET /docs` - Machine-readable OpenAPI document and Swagger UI
 - `GET /metrics` - Prometheus metrics (request counts, durations, PVC usage)
 - `GET /models` - List available models (cached)
 - `GET /models/{id}` - Get details for a specific model
@@ -65,6 +67,7 @@ HTTP API service for dynamically managing KServe InferenceServices based on mode
 - `DELETE /weights/{name}` - Delete cached weights
 - `POST /weights/install` - Install weights from HuggingFace (body includes `hfModelId`, optional `revision`, `files`, etc.)
   - Response includes the `storageUri` (`pvc://...`) and `inferenceModelPath` you can paste directly into the catalog entry (`MODEL_ID` env) so the runtime loads the cached copy. When async mode is enabled the endpoint returns `202 Accepted` plus a `job` object you can poll below.
+- `GET /weights/install/status/{id}` - Convenience alias for checking install job status
 - `GET /jobs` / `GET /jobs/{id}` - Inspect asynchronous work (weight installs, etc.)
 - `GET /history` - Fetch recent install/activation/deletion events for UI timelines
 - `GET /vllm/supported-models` - List vLLM-supported architectures scraped from GitHub
@@ -74,8 +77,8 @@ HTTP API service for dynamically managing KServe InferenceServices based on mode
 ## Building
 
 ```bash
-docker build -t ghcr.io/oremus-labs/ol-model-manager:0.4.4-go .
-docker push ghcr.io/oremus-labs/ol-model-manager:0.4.4-go
+docker build -t ghcr.io/oremus-labs/ol-model-manager:0.4.5-go .
+docker push ghcr.io/oremus-labs/ol-model-manager:0.4.5-go
 ```
 
 ## Running Locally

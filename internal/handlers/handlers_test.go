@@ -14,6 +14,7 @@ import (
 	"github.com/oremus-labs/ol-model-manager/internal/catalog"
 	"github.com/oremus-labs/ol-model-manager/internal/catalogwriter"
 	"github.com/oremus-labs/ol-model-manager/internal/recommendations"
+	"github.com/oremus-labs/ol-model-manager/internal/store"
 	"github.com/oremus-labs/ol-model-manager/internal/vllm"
 	"github.com/oremus-labs/ol-model-manager/internal/weights"
 )
@@ -337,6 +338,102 @@ func TestSystemInfo(t *testing.T) {
 	}
 }
 
+func TestListJobsFilters(t *testing.T) {
+	t.Parallel()
+
+	st := newTempStore(t)
+	h := New(nil, nil, nil, nil, nil, nil, nil, st, nil, Options{HistoryLimit: 5})
+
+	job1 := &store.Job{
+		ID:      "job-1",
+		Type:    "weight_install",
+		Status:  store.JobDone,
+		Payload: map[string]interface{}{"hfModelId": "foo/bar"},
+	}
+	_ = st.CreateJob(job1)
+	job1.Status = store.JobDone
+	_ = st.UpdateJob(job1)
+
+	job2 := &store.Job{
+		ID:      "job-2",
+		Type:    "weight_install",
+		Status:  store.JobFailed,
+		Payload: map[string]interface{}{"hfModelId": "other"},
+	}
+	_ = st.CreateJob(job2)
+	job2.Status = store.JobFailed
+	_ = st.UpdateJob(job2)
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	req := httptest.NewRequest(http.MethodGet, "/jobs?status=completed&type=weight_install&modelId=foo/bar", nil)
+	c.Request = req
+
+	h.ListJobs(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 got %d", w.Code)
+	}
+	var payload struct {
+		Jobs []store.Job `json:"jobs"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed decoding jobs: %v", err)
+	}
+	if len(payload.Jobs) != 1 || payload.Jobs[0].ID != "job-1" {
+		t.Fatalf("unexpected jobs payload: %+v", payload)
+	}
+}
+
+func TestListHistoryFilters(t *testing.T) {
+	t.Parallel()
+
+	st := newTempStore(t)
+	h := New(nil, nil, nil, nil, nil, nil, nil, st, nil, Options{HistoryLimit: 5})
+
+	_ = st.AppendHistory(&store.HistoryEntry{ID: "1", Event: "weight_install_completed", ModelID: "foo"})
+	_ = st.AppendHistory(&store.HistoryEntry{ID: "2", Event: "model_activated", ModelID: "bar"})
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	req := httptest.NewRequest(http.MethodGet, "/history?event=weight_install_completed&modelId=foo", nil)
+	c.Request = req
+
+	h.ListHistory(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200 got %d", w.Code)
+	}
+	var resp struct {
+		Events []store.HistoryEntry `json:"events"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if len(resp.Events) != 1 || resp.Events[0].ModelID != "foo" {
+		t.Fatalf("unexpected history filter result: %+v", resp.Events)
+	}
+}
+
+func TestOpenAPISpecEndpoint(t *testing.T) {
+	t.Parallel()
+
+	h := New(nil, nil, nil, nil, nil, nil, nil, nil, nil, Options{})
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/openapi", nil)
+
+	h.OpenAPISpec(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 got %d", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "\"openapi\"") {
+		t.Fatalf("expected openapi json, got %s", w.Body.String())
+	}
+}
+
 type fakeWeightStore struct {
 	listResp        []weights.WeightInfo
 	getResp         *weights.WeightInfo
@@ -480,4 +577,17 @@ func (f *fakeAdvisor) Profiles() []recommendations.GPUProfile {
 	return []recommendations.GPUProfile{
 		{Name: "test-gpu", MemoryGB: 32},
 	}
+}
+
+func newTempStore(t *testing.T) *store.Store {
+	t.Helper()
+	dir := t.TempDir()
+	s, err := store.Open(dir)
+	if err != nil {
+		t.Fatalf("failed opening store: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = s.Close()
+	})
+	return s
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math"
 	"time"
 
 	"github.com/google/uuid"
@@ -67,10 +68,8 @@ func (m *Manager) runInstall(job *store.Job, req InstallRequest) {
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Hour)
 	defer cancel()
 
-	job.Status = store.JobRunning
-	if err := m.store.UpdateJob(job); err != nil {
-		log.Printf("jobs: failed to update job %s: %v", job.ID, err)
-	}
+	m.updateJob(job, store.JobRunning, 5, "queued", "Waiting for worker")
+	m.updateJob(job, store.JobRunning, 15, "preparing", "Preparing cache directory")
 
 	info, err := m.weights.InstallFromHuggingFace(ctx, weights.InstallOptions{
 		ModelID:   req.ModelID,
@@ -79,30 +78,58 @@ func (m *Manager) runInstall(job *store.Job, req InstallRequest) {
 		Files:     req.Files,
 		Token:     m.hfToken,
 		Overwrite: req.Overwrite,
+		Progress: func(file string, completed, total int) {
+			progress := 20
+			if total > 0 {
+				progress = 20 + int(math.Round(float64(completed)/float64(total)*70))
+			}
+			msg := "Downloading weights"
+			if file != "" {
+				msg = fmt.Sprintf("Downloading %s (%d/%d)", file, completed, total)
+			}
+			m.updateJob(job, store.JobRunning, progress, "downloading", msg)
+		},
 	})
 
 	if err != nil {
-		job.Status = store.JobFailed
 		job.Error = err.Error()
-		_ = m.store.UpdateJob(job)
+		m.updateJob(job, store.JobFailed, job.Progress, "failed", err.Error())
 		m.appendHistory(job.ID, "weight_install_failed", req.ModelID, map[string]interface{}{
 			"error": err.Error(),
 		})
 		return
 	}
 
-	job.Status = store.JobDone
+	job.Error = ""
 	job.Result = map[string]interface{}{
 		"path":      info.Path,
 		"name":      info.Name,
 		"sizeBytes": info.SizeBytes,
 	}
-	job.Error = ""
-	if err := m.store.UpdateJob(job); err != nil {
-		log.Printf("jobs: failed to update completed job %s: %v", job.ID, err)
-	}
+	m.updateJob(job, store.JobDone, 100, "completed", "Weights ready")
 
 	m.appendHistory(job.ID, "weight_install_completed", req.ModelID, job.Result)
+}
+
+func (m *Manager) updateJob(job *store.Job, status store.JobStatus, progress int, stage, message string) {
+	if status != "" {
+		job.Status = status
+	}
+	if progress >= 0 {
+		if progress > 100 {
+			progress = 100
+		}
+		job.Progress = progress
+	}
+	if stage != "" {
+		job.Stage = stage
+	}
+	if message != "" {
+		job.Message = message
+	}
+	if err := m.store.UpdateJob(job); err != nil {
+		log.Printf("jobs: failed to update job %s: %v", job.ID, err)
+	}
 }
 
 func (m *Manager) appendHistory(id, event, modelID string, meta map[string]interface{}) {

@@ -44,20 +44,7 @@ func TestManagerEnqueueWeightInstallSuccess(t *testing.T) {
 
 	waitForJobStatus(t, s, job.ID, store.JobDone)
 
-	history, err := s.ListHistory(5)
-	if err != nil {
-		t.Fatalf("ListHistory: %v", err)
-	}
-	found := false
-	for _, entry := range history {
-		if entry.Event == "weight_install_completed" {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Fatalf("expected completion event in history: %+v", history)
-	}
+	waitForHistoryEvent(t, s, "weight_install_completed")
 }
 
 func TestManagerEnqueueWeightInstallFailure(t *testing.T) {
@@ -78,20 +65,7 @@ func TestManagerEnqueueWeightInstallFailure(t *testing.T) {
 
 	waitForJobStatus(t, s, job.ID, store.JobFailed)
 
-	history, err := s.ListHistory(5)
-	if err != nil {
-		t.Fatalf("ListHistory: %v", err)
-	}
-	found := false
-	for _, entry := range history {
-		if entry.Event == "weight_install_failed" {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Fatalf("expected failure event in history: %+v", history)
-	}
+	waitForHistoryEvent(t, s, "weight_install_failed")
 }
 
 func openTestStore(t *testing.T) *store.Store {
@@ -123,6 +97,29 @@ func waitForJobStatus(t *testing.T, s *store.Store, id string, status store.JobS
 			}
 			if job.Status == status {
 				return
+			}
+		}
+	}
+}
+
+func waitForHistoryEvent(t *testing.T, s *store.Store, event string) {
+	t.Helper()
+	timeout := time.After(2 * time.Second)
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-timeout:
+			t.Fatalf("timed out waiting for history event %s", event)
+		case <-ticker.C:
+			entries, err := s.ListHistory(10)
+			if err != nil {
+				continue
+			}
+			for _, entry := range entries {
+				if entry.Event == event {
+					return
+				}
 			}
 		}
 	}

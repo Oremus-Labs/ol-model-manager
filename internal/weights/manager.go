@@ -73,6 +73,7 @@ type InstallOptions struct {
 	Files     []string
 	Token     string
 	Overwrite bool
+	Progress  func(file string, completed, total int)
 }
 
 // New creates a new weight manager.
@@ -293,6 +294,9 @@ func (m *Manager) InstallFromHuggingFace(ctx context.Context, opts InstallOption
 			return nil, fmt.Errorf("failed to download %s: %w", file, err)
 		}
 		downloadedFiles++
+		if opts.Progress != nil {
+			opts.Progress(file, downloadedFiles, len(opts.Files))
+		}
 	}
 
 	if downloadedFiles == 0 {
@@ -303,6 +307,10 @@ func (m *Manager) InstallFromHuggingFace(ctx context.Context, opts InstallOption
 	if err := os.Rename(tmpPath, destPath); err != nil {
 		_ = os.RemoveAll(tmpPath)
 		return nil, fmt.Errorf("failed to finalize weights: %w", err)
+	}
+
+	if opts.Progress != nil {
+		opts.Progress("", len(opts.Files), len(opts.Files))
 	}
 
 	info, err := m.getWeightInfo(destPath, target)
