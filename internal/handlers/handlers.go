@@ -3,7 +3,9 @@ package handlers
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"path"
@@ -13,7 +15,10 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/oremus-labs/ol-model-manager/internal/catalog"
+	"github.com/oremus-labs/ol-model-manager/internal/catalogwriter"
 	"github.com/oremus-labs/ol-model-manager/internal/kserve"
+	"github.com/oremus-labs/ol-model-manager/internal/recommendations"
+	"github.com/oremus-labs/ol-model-manager/internal/validator"
 	"github.com/oremus-labs/ol-model-manager/internal/vllm"
 	"github.com/oremus-labs/ol-model-manager/internal/weights"
 )
@@ -23,6 +28,7 @@ type Options struct {
 	CatalogTTL            time.Duration
 	WeightsInstallTimeout time.Duration
 	HuggingFaceToken      string
+	GitHubToken           string
 	WeightsPVCName        string
 	InferenceModelRoot    string
 }
@@ -41,12 +47,30 @@ type discoveryService interface {
 	GetHuggingFaceModel(string) (*vllm.HuggingFaceModel, error)
 }
 
+type catalogValidator interface {
+	Validate(context.Context, []byte, *catalog.Model) validator.Result
+}
+
+type catalogWriter interface {
+	Save(*catalog.Model) (*catalogwriter.SaveResult, error)
+	CommitAndPush(context.Context, string, string, string, ...string) error
+	CreatePullRequest(context.Context, catalogwriter.PullRequestOptions) (*catalogwriter.PullRequest, error)
+}
+
+type recommendationService interface {
+	Compatibility(*catalog.Model, string) recommendations.CompatibilityReport
+	Recommend(string) recommendations.Recommendation
+}
+
 // Handler encapsulates dependencies for HTTP handlers.
 type Handler struct {
 	catalog *catalog.Catalog
 	kserve  *kserve.Client
 	weights weightStore
 	vllm    discoveryService
+	checker catalogValidator
+	writer  catalogWriter
+	advisor recommendationService
 	opts    Options
 
 	catalogMu          sync.Mutex
@@ -54,7 +78,7 @@ type Handler struct {
 }
 
 // New creates a new Handler instance.
-func New(cat *catalog.Catalog, ks *kserve.Client, wm weightStore, vdisc discoveryService, opts Options) *Handler {
+func New(cat *catalog.Catalog, ks *kserve.Client, wm weightStore, vdisc discoveryService, val catalogValidator, writer catalogWriter, advisor recommendationService, opts Options) *Handler {
 	if opts.CatalogTTL <= 0 {
 		opts.CatalogTTL = time.Minute
 	}
@@ -70,6 +94,9 @@ func New(cat *catalog.Catalog, ks *kserve.Client, wm weightStore, vdisc discover
 		kserve:             ks,
 		weights:            wm,
 		vllm:               vdisc,
+		checker:            val,
+		writer:             writer,
+		advisor:            advisor,
 		opts:               opts,
 		lastCatalogRefresh: time.Now(),
 	}
@@ -85,6 +112,33 @@ type installWeightsRequest struct {
 	Target    string   `json:"target,omitempty"`
 	Files     []string `json:"files,omitempty"`
 	Overwrite bool     `json:"overwrite"`
+}
+
+type testModelRequest struct {
+	ID             string `json:"id" binding:"required"`
+	ReadinessURL   string `json:"readinessUrl,omitempty"`
+	TimeoutSeconds int    `json:"timeoutSeconds,omitempty"`
+}
+
+type generateCatalogRequest struct {
+	HFModelID    string               `json:"hfModelId" binding:"required"`
+	DisplayName  string               `json:"displayName,omitempty"`
+	AutoDetect   bool                 `json:"autoDetect"`
+	StorageURI   string               `json:"storageUri,omitempty"`
+	Resources    *catalog.Resources   `json:"resources,omitempty"`
+	NodeSelector map[string]string    `json:"nodeSelector,omitempty"`
+	Tolerations  []catalog.Toleration `json:"tolerations,omitempty"`
+	Env          []catalog.EnvVar     `json:"env,omitempty"`
+}
+
+type catalogPRRequest struct {
+	Model    catalog.Model `json:"model" binding:"required"`
+	Branch   string        `json:"branch,omitempty"`
+	Base     string        `json:"base,omitempty"`
+	Title    string        `json:"title,omitempty"`
+	Body     string        `json:"body,omitempty"`
+	Draft    bool          `json:"draft"`
+	Validate bool          `json:"validate"`
 }
 
 // Health returns the health status of the service.
@@ -216,6 +270,77 @@ func (h *Handler) RefreshCatalog(c *gin.Context) {
 		"message": "Catalog refreshed",
 		"models":  h.catalog.List(),
 	})
+}
+
+// ValidateCatalog runs schema/resource checks against a proposed catalog entry.
+func (h *Handler) ValidateCatalog(c *gin.Context) {
+	if h.checker == nil {
+		c.JSON(http.StatusNotImplemented, gin.H{"error": "catalog validation is disabled"})
+		return
+	}
+
+	body, err := io.ReadAll(c.Request.Body)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "failed to read request body"})
+		return
+	}
+
+	var model catalog.Model
+	if err := json.Unmarshal(body, &model); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid model payload: " + err.Error()})
+		return
+	}
+
+	result := h.checker.Validate(c.Request.Context(), body, &model)
+	status := http.StatusOK
+	if !result.Valid {
+		status = http.StatusBadRequest
+	}
+
+	c.JSON(status, result)
+}
+
+// TestModel performs a dry-run activation (and optional readiness probe) for a model.
+func (h *Handler) TestModel(c *gin.Context) {
+	var req testModelRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	if err := h.ensureCatalogFresh(false); err != nil {
+		log.Printf("Failed to ensure catalog freshness: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load model catalog"})
+		return
+	}
+
+	model := h.catalog.Get(req.ID)
+	if model == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "model not found"})
+		return
+	}
+
+	dryRun, err := h.kserve.DryRun(model)
+	if err != nil {
+		log.Printf("Dry-run failed for model %s: %v", req.ID, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	response := gin.H{
+		"status": "success",
+		"dryRun": dryRun,
+	}
+
+	if req.ReadinessURL != "" {
+		readiness := h.checkReadiness(c.Request.Context(), req.ReadinessURL, req.TimeoutSeconds)
+		response["readiness"] = readiness
+		if readiness["status"] != "ok" {
+			response["status"] = "warning"
+		}
+	}
+
+	c.JSON(http.StatusOK, response)
 }
 
 // ListWeights returns cached weights stored on Venus.
@@ -394,6 +519,189 @@ func (h *Handler) DiscoverModel(c *gin.Context) {
 	c.JSON(http.StatusOK, model)
 }
 
+// GenerateCatalogEntry produces a draft catalog model with optional overrides.
+func (h *Handler) GenerateCatalogEntry(c *gin.Context) {
+	if h.vllm == nil {
+		c.JSON(http.StatusNotImplemented, gin.H{"error": "vLLM discovery is disabled"})
+		return
+	}
+
+	var req generateCatalogRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	model, err := h.vllm.GenerateModelConfig(vllm.GenerateRequest{
+		HFModelID:   req.HFModelID,
+		DisplayName: req.DisplayName,
+		AutoDetect:  req.AutoDetect,
+	})
+	if err != nil {
+		log.Printf("Failed to generate model config: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	if req.StorageURI != "" {
+		model.StorageURI = req.StorageURI
+	}
+	if req.Resources != nil {
+		model.Resources = req.Resources
+	}
+	if req.NodeSelector != nil {
+		model.NodeSelector = req.NodeSelector
+	}
+	if req.Tolerations != nil {
+		model.Tolerations = req.Tolerations
+	}
+	if req.Env != nil {
+		model.Env = req.Env
+	}
+
+	response := gin.H{"model": model}
+	if h.checker != nil {
+		result := h.checker.Validate(c.Request.Context(), nil, model)
+		response["validation"] = result
+		if !result.Valid {
+			response["status"] = "warning"
+		}
+	}
+
+	c.JSON(http.StatusOK, response)
+}
+
+// CreateCatalogPR saves a catalog entry, commits it, and optionally opens a PR.
+func (h *Handler) CreateCatalogPR(c *gin.Context) {
+	if h.writer == nil {
+		c.JSON(http.StatusNotImplemented, gin.H{"error": "catalog contribution automation is disabled"})
+		return
+	}
+
+	var req catalogPRRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	if req.Model.ID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "model.id is required"})
+		return
+	}
+
+	model := req.Model
+	var validation interface{}
+	if req.Validate && h.checker != nil {
+		result := h.checker.Validate(c.Request.Context(), nil, &model)
+		validation = result
+		if !result.Valid {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error":      "model validation failed",
+				"validation": result,
+			})
+			return
+		}
+	}
+
+	saveResult, err := h.writer.Save(&model)
+	if err != nil {
+		log.Printf("Failed to save catalog entry: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	branch := req.Branch
+	if branch == "" {
+		branch = fmt.Sprintf("model/%s", model.ID)
+	}
+
+	title := req.Title
+	if title == "" {
+		title = fmt.Sprintf("Add model %s", modelDisplayName(&model))
+	}
+
+	body := req.Body
+	if body == "" {
+		body = fmt.Sprintf("Automated catalog entry for `%s`.", modelDisplayName(&model))
+	}
+
+	if err := h.writer.CommitAndPush(c.Request.Context(), branch, req.Base, title, saveResult.RelativePath); err != nil {
+		log.Printf("Failed to commit/push catalog change: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	response := gin.H{
+		"status": "success",
+		"branch": branch,
+		"file":   saveResult.RelativePath,
+	}
+	if validation != nil {
+		response["validation"] = validation
+	}
+
+	if h.opts.GitHubToken == "" {
+		response["message"] = "changes committed locally; set GITHUB_TOKEN to enable automatic PR creation"
+		c.JSON(http.StatusOK, response)
+		return
+	}
+
+	pr, err := h.writer.CreatePullRequest(c.Request.Context(), catalogwriter.PullRequestOptions{
+		Branch: branch,
+		Base:   req.Base,
+		Title:  title,
+		Body:   body,
+		Draft:  req.Draft,
+		Token:  h.opts.GitHubToken,
+	})
+	if err != nil {
+		log.Printf("Failed to open pull request: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	response["pullRequest"] = pr
+
+	c.JSON(http.StatusOK, response)
+}
+
+// ModelCompatibility reports whether a catalog entry fits on the requested GPU.
+func (h *Handler) ModelCompatibility(c *gin.Context) {
+	if h.advisor == nil {
+		c.JSON(http.StatusNotImplemented, gin.H{"error": "compatibility service is disabled"})
+		return
+	}
+
+	if err := h.ensureCatalogFresh(false); err != nil {
+		log.Printf("Failed to ensure catalog freshness: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load model catalog"})
+		return
+	}
+
+	modelID := c.Param("id")
+	model := h.catalog.Get(modelID)
+	if model == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "model not found"})
+		return
+	}
+
+	gpuType := c.Query("gpuType")
+	report := h.advisor.Compatibility(model, gpuType)
+	c.JSON(http.StatusOK, report)
+}
+
+// GPURecommendations returns vLLM flag suggestions for a GPU type.
+func (h *Handler) GPURecommendations(c *gin.Context) {
+	if h.advisor == nil {
+		c.JSON(http.StatusNotImplemented, gin.H{"error": "recommendations service is disabled"})
+		return
+	}
+
+	gpuType := c.Param("gpuType")
+	rec := h.advisor.Recommend(gpuType)
+	c.JSON(http.StatusOK, rec)
+}
+
 func (h *Handler) ensureCatalogFresh(force bool) error {
 	h.catalogMu.Lock()
 	defer h.catalogMu.Unlock()
@@ -427,6 +735,53 @@ func collectHuggingFaceFiles(model *vllm.HuggingFaceModel) []string {
 	}
 
 	return files
+}
+
+func (h *Handler) checkReadiness(ctx context.Context, url string, timeoutSeconds int) gin.H {
+	timeout := time.Duration(timeoutSeconds) * time.Second
+	if timeout <= 0 {
+		timeout = 10 * time.Second
+	}
+
+	reqCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, url, nil)
+	if err != nil {
+		return gin.H{"status": "error", "message": err.Error()}
+	}
+
+	start := time.Now()
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return gin.H{"status": "error", "message": err.Error()}
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+
+	status := "ok"
+	if resp.StatusCode >= 400 {
+		status = "fail"
+	}
+
+	return gin.H{
+		"status":   status,
+		"code":     resp.StatusCode,
+		"duration": time.Since(start).String(),
+		"url":      url,
+		"preview":  string(body),
+	}
+}
+
+func modelDisplayName(model *catalog.Model) string {
+	if model == nil {
+		return ""
+	}
+	if model.DisplayName != "" {
+		return model.DisplayName
+	}
+	return model.ID
 }
 
 var hfModelIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$`)

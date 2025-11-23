@@ -11,6 +11,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/oremus-labs/ol-model-manager/internal/catalog"
+	"github.com/oremus-labs/ol-model-manager/internal/catalogwriter"
 	"github.com/oremus-labs/ol-model-manager/internal/vllm"
 	"github.com/oremus-labs/ol-model-manager/internal/weights"
 )
@@ -29,7 +30,7 @@ func TestListWeights(t *testing.T) {
 		}},
 	}
 
-	handler := New(nil, nil, store, nil, Options{})
+	handler := New(nil, nil, store, nil, nil, nil, nil, Options{})
 
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
@@ -73,7 +74,7 @@ func TestInstallWeightsDerivesFilesFromHuggingFace(t *testing.T) {
 		},
 	}
 
-	handler := New(nil, nil, store, discovery, Options{
+	handler := New(nil, nil, store, discovery, nil, nil, nil, Options{
 		WeightsPVCName:     "venus-model-storage",
 		InferenceModelRoot: "/mnt/models",
 	})
@@ -120,7 +121,7 @@ func TestInstallWeightsDerivesFilesFromHuggingFace(t *testing.T) {
 func TestInstallWeightsRejectsInvalidHFID(t *testing.T) {
 	t.Parallel()
 
-	handler := New(nil, nil, &fakeWeightStore{}, &fakeDiscovery{}, Options{})
+	handler := New(nil, nil, &fakeWeightStore{}, &fakeDiscovery{}, nil, nil, nil, Options{})
 
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
@@ -132,6 +133,85 @@ func TestInstallWeightsRejectsInvalidHFID(t *testing.T) {
 
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestGenerateCatalogEntry(t *testing.T) {
+	t.Parallel()
+
+	discovery := &fakeDiscovery{
+		modelResp: &catalog.Model{ID: "draft-model", HFModelID: "foo/bar"},
+	}
+
+	handler := New(nil, nil, nil, discovery, nil, nil, nil, Options{})
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	body := strings.NewReader(`{"hfModelId":"foo/bar","storageUri":"pvc://venus/foo"}`)
+	c.Request = httptest.NewRequest(http.MethodPost, "/catalog/generate", body)
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	handler.GenerateCatalogEntry(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 got %d body=%s", w.Code, w.Body.String())
+	}
+
+	var resp struct {
+		Model catalog.Model `json:"model"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	if resp.Model.StorageURI != "pvc://venus/foo" {
+		t.Fatalf("storage override not applied: %+v", resp.Model)
+	}
+}
+
+func TestCreateCatalogPR(t *testing.T) {
+	t.Parallel()
+
+	writer := &fakeCatalogWriter{
+		saveResult: &catalogwriter.SaveResult{
+			RelativePath: "models/foo.json",
+		},
+		pr: &catalogwriter.PullRequest{
+			Number:  42,
+			HTMLURL: "https://github.com/example/pull/42",
+		},
+	}
+
+	handler := New(nil, nil, nil, nil, nil, writer, nil, Options{
+		GitHubToken: "token",
+	})
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	body := strings.NewReader(`{"model":{"id":"foo","hfModelId":"foo/bar"}}`)
+	c.Request = httptest.NewRequest(http.MethodPost, "/catalog/pr", body)
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	handler.CreateCatalogPR(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 got %d body=%s", w.Code, w.Body.String())
+	}
+
+	var resp map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+
+	if resp["pullRequest"] == nil {
+		t.Fatalf("expected pullRequest in response: %v", resp)
+	}
+
+	if !writer.commitCalled {
+		t.Fatalf("expected commit to be called")
+	}
+	if writer.lastBranch != "model/foo" {
+		t.Fatalf("unexpected branch: %s", writer.lastBranch)
 	}
 }
 
@@ -168,15 +248,30 @@ func (f *fakeWeightStore) InstallFromHuggingFace(ctx context.Context, opts weigh
 }
 
 type fakeDiscovery struct {
-	hfModel *vllm.HuggingFaceModel
+	hfModel   *vllm.HuggingFaceModel
+	modelResp *catalog.Model
 }
 
 func (f *fakeDiscovery) ListSupportedArchitectures() ([]vllm.ModelArchitecture, error) {
 	return nil, nil
 }
 
-func (f *fakeDiscovery) GenerateModelConfig(vllm.GenerateRequest) (*catalog.Model, error) {
-	return nil, nil
+func (f *fakeDiscovery) GenerateModelConfig(req vllm.GenerateRequest) (*catalog.Model, error) {
+	if f.modelResp != nil {
+		model := *f.modelResp
+		if req.HFModelID != "" {
+			model.HFModelID = req.HFModelID
+		}
+		if req.DisplayName != "" {
+			model.DisplayName = req.DisplayName
+		}
+		return &model, nil
+	}
+	return &catalog.Model{
+		ID:          "auto-model",
+		HFModelID:   req.HFModelID,
+		DisplayName: req.DisplayName,
+	}, nil
 }
 
 func (f *fakeDiscovery) GetHuggingFaceModel(modelID string) (*vllm.HuggingFaceModel, error) {
@@ -184,4 +279,32 @@ func (f *fakeDiscovery) GetHuggingFaceModel(modelID string) (*vllm.HuggingFaceMo
 	model.ID = modelID
 	model.ModelID = modelID
 	return &model, nil
+}
+
+type fakeCatalogWriter struct {
+	saveResult   *catalogwriter.SaveResult
+	saveErr      error
+	commitErr    error
+	pr           *catalogwriter.PullRequest
+	prErr        error
+	commitCalled bool
+	lastBranch   string
+	lastMessage  string
+	lastPaths    []string
+}
+
+func (f *fakeCatalogWriter) Save(model *catalog.Model) (*catalogwriter.SaveResult, error) {
+	return f.saveResult, f.saveErr
+}
+
+func (f *fakeCatalogWriter) CommitAndPush(ctx context.Context, branch, base, message string, paths ...string) error {
+	f.commitCalled = true
+	f.lastBranch = branch
+	f.lastMessage = message
+	f.lastPaths = paths
+	return f.commitErr
+}
+
+func (f *fakeCatalogWriter) CreatePullRequest(ctx context.Context, opts catalogwriter.PullRequestOptions) (*catalogwriter.PullRequest, error) {
+	return f.pr, f.prErr
 }

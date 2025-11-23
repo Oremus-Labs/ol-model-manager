@@ -16,9 +16,13 @@ type Config struct {
 	CatalogRoot            string
 	CatalogModelsDir       string
 	CatalogRefreshInterval time.Duration
+	CatalogSchemaPath      string
+	CatalogRepo            string
+	CatalogBaseBranch      string
 
 	// KServe configuration
 	Namespace            string
+	ValidationNamespace  string
 	InferenceServiceName string
 
 	// Weights / storage configuration
@@ -28,27 +32,40 @@ type Config struct {
 
 	// Inference runtime expectations
 	InferenceModelRoot string
+	GPUProfilesPath    string
 
 	// External tokens
 	HuggingFaceToken string
 	GitHubToken      string
+	GitAuthorName    string
+	GitAuthorEmail   string
+	APIToken         string
 }
 
 // Load loads configuration from environment variables with defaults.
 func Load() *Config {
+	namespace := getEnv("ACTIVE_NAMESPACE", "ai")
 	return &Config{
 		ServerPort:             getEnv("SERVER_PORT", "8080"),
 		CatalogRoot:            getEnv("MODEL_CATALOG_ROOT", "/workspace/catalog"),
 		CatalogModelsDir:       getEnv("MODEL_CATALOG_MODELS_SUBDIR", "models"),
+		CatalogSchemaPath:      getEnv("MODEL_CATALOG_SCHEMA_PATH", ""),
 		CatalogRefreshInterval: getEnvDuration("CATALOG_REFRESH_INTERVAL", 30*time.Second),
-		Namespace:              getEnv("ACTIVE_NAMESPACE", "ai"),
+		CatalogRepo:            getEnv("CATALOG_REPO", ""),
+		CatalogBaseBranch:      getEnv("CATALOG_BASE_BRANCH", "main"),
+		Namespace:              namespace,
+		ValidationNamespace:    getEnv("VALIDATION_NAMESPACE", namespace),
 		InferenceServiceName:   getEnv("ACTIVE_INFERENCESERVICE_NAME", "active-llm"),
 		WeightsStoragePath:     getEnv("WEIGHTS_STORAGE_PATH", "/mnt/models"),
 		WeightsInstallTimeout:  getEnvDuration("WEIGHTS_INSTALL_TIMEOUT", 30*time.Minute),
 		WeightsPVCName:         getEnv("WEIGHTS_PVC_NAME", "venus-model-storage"),
 		InferenceModelRoot:     getEnv("INFERENCE_MODEL_ROOT", "/mnt/models"),
+		GPUProfilesPath:        getEnv("GPU_PROFILE_PATH", ""),
 		HuggingFaceToken:       os.Getenv("HUGGINGFACE_API_TOKEN"),
 		GitHubToken:            os.Getenv("GITHUB_TOKEN"),
+		GitAuthorName:          getEnv("GIT_AUTHOR_NAME", ""),
+		GitAuthorEmail:         getEnv("GIT_AUTHOR_EMAIL", ""),
+		APIToken:               os.Getenv("MODEL_MANAGER_API_TOKEN"),
 	}
 }
 

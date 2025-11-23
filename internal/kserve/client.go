@@ -5,18 +5,18 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/oremus-labs/ol-model-manager/internal/catalog"
+	"github.com/oremus-labs/ol-model-manager/internal/kube"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/clientcmd"
 )
 
 const (
@@ -40,13 +40,23 @@ type Result struct {
 	Name   string `json:"name"`
 }
 
+// DryRunResult captures the outcome of a dry-run activation.
+type DryRunResult struct {
+	Action   string                 `json:"action"`
+	Manifest map[string]interface{} `json:"manifest"`
+}
+
 // NewClient creates a new KServe client.
 func NewClient(namespace, isvcName, inferenceModelRoot string) (*Client, error) {
-	config, err := getKubeConfig()
+	config, err := kube.LoadConfig()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get kubeconfig: %w", err)
 	}
+	return NewClientWithConfig(config, namespace, isvcName, inferenceModelRoot)
+}
 
+// NewClientWithConfig creates a KServe client using the provided REST config.
+func NewClientWithConfig(config *rest.Config, namespace, isvcName, inferenceModelRoot string) (*Client, error) {
 	dynClient, err := dynamic.NewForConfig(config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create dynamic client: %w", err)
@@ -63,27 +73,6 @@ func NewClient(namespace, isvcName, inferenceModelRoot string) (*Client, error) 
 			Resource: isvcResource,
 		},
 	}, nil
-}
-
-func getKubeConfig() (*rest.Config, error) {
-	// Try in-cluster config first
-	config, err := rest.InClusterConfig()
-	if err == nil {
-		log.Println("Using in-cluster Kubernetes configuration")
-		return config, nil
-	}
-
-	log.Printf("In-cluster config not available: %v", err)
-	log.Println("Attempting to load local kubeconfig")
-
-	// Fall back to local kubeconfig
-	kubeconfig := filepath.Join(os.Getenv("HOME"), ".kube", "config")
-	config, err = clientcmd.BuildConfigFromFlags("", kubeconfig)
-	if err != nil {
-		return nil, fmt.Errorf("failed to load kubeconfig: %w", err)
-	}
-
-	return config, nil
 }
 
 // Activate creates or updates an InferenceService for the given model.
@@ -114,6 +103,35 @@ func (c *Client) Activate(model *catalog.Model) (*Result, error) {
 	}
 
 	return &Result{Action: "created", Name: c.isvcName}, nil
+}
+
+// DryRun renders the InferenceService and performs a server-side dry-run.
+func (c *Client) DryRun(model *catalog.Model) (*DryRunResult, error) {
+	isvc := buildInferenceService(c.namespace, c.isvcName, model, c.inferenceModelRoot)
+	manifest := deepCopyMap(isvc.Object)
+
+	ctx := context.Background()
+	action := "create"
+
+	_, err := c.client.Resource(c.gvr).Namespace(c.namespace).Create(ctx, isvc.DeepCopy(), metav1.CreateOptions{
+		DryRun: []string{metav1.DryRunAll},
+	})
+	if err != nil {
+		if apierrors.IsAlreadyExists(err) {
+			action = "update"
+			_, err = c.client.Resource(c.gvr).Namespace(c.namespace).Update(ctx, isvc.DeepCopy(), metav1.UpdateOptions{
+				DryRun: []string{metav1.DryRunAll},
+			})
+		}
+		if err != nil {
+			return nil, fmt.Errorf("kserve dry-run failed: %w", err)
+		}
+	}
+
+	return &DryRunResult{
+		Action:   action,
+		Manifest: manifest,
+	}, nil
 }
 
 // Deactivate deletes the active InferenceService.
@@ -301,6 +319,7 @@ func prepareEnvVars(env []catalog.EnvVar, storageURI, inferenceModelRoot string)
 		if strings.HasPrefix(e.Value, "/") {
 			break
 		}
+		env[i].ValueFrom = nil
 		env[i].Value = localPath
 		break
 	}
@@ -324,9 +343,42 @@ func deriveLocalModelPath(storageURI, inferenceModelRoot string) string {
 		return ""
 	}
 
-	if inferenceModelRoot == "" {
-		return ""
+	trimmed := strings.TrimPrefix(storageURI, pvcPrefix)
+	parts := strings.SplitN(trimmed, "/", 2)
+	if len(parts) < 2 || parts[1] == "" {
+		return inferenceModelRoot
 	}
 
-	return inferenceModelRoot
+	subPath := strings.Trim(parts[1], "/")
+	return filepath.Join(inferenceModelRoot, subPath)
+}
+
+func deepCopyMap(src map[string]interface{}) map[string]interface{} {
+	dst := make(map[string]interface{}, len(src))
+	for k, v := range src {
+		switch val := v.(type) {
+		case map[string]interface{}:
+			dst[k] = deepCopyMap(val)
+		case []interface{}:
+			dst[k] = deepCopySlice(val)
+		default:
+			dst[k] = val
+		}
+	}
+	return dst
+}
+
+func deepCopySlice(src []interface{}) []interface{} {
+	out := make([]interface{}, len(src))
+	for i, v := range src {
+		switch val := v.(type) {
+		case map[string]interface{}:
+			out[i] = deepCopyMap(val)
+		case []interface{}:
+			out[i] = deepCopySlice(val)
+		default:
+			out[i] = val
+		}
+	}
+	return out
 }

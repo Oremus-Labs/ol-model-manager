@@ -10,6 +10,9 @@ HTTP API service for dynamically managing KServe InferenceServices based on mode
 - Install new model weights directly from HuggingFace (with optional auth token)
 - Generate draft catalog entries from HuggingFace metadata via vLLM discovery helpers
 - Query PVC usage statistics and supported vLLM architectures
+- Validate catalog entries against the shared schema, PVC/secret availability, and GPU capacity
+- Dry-run KServe activations (and optional readiness probes) before flipping production traffic
+- Estimate GPU compatibility + runtime recommendations per catalog entry
 
 ## Environment Variables
 
@@ -24,16 +27,27 @@ HTTP API service for dynamically managing KServe InferenceServices based on mode
 - `INFERENCE_MODEL_ROOT` - Path where KServe mounts the PVC inside runtime containers (default: `/mnt/models`)
 - `HUGGINGFACE_API_TOKEN` - Optional token for private HuggingFace models
 - `GITHUB_TOKEN` - Optional token for calling the GitHub API when scraping vLLM metadata
+- `CATALOG_REPO` - GitHub repo slug (`owner/repo`) for PR automation (enables `/catalog/pr`)
+- `CATALOG_BASE_BRANCH` - Default base branch for catalog PRs (default: `main`)
+- `GIT_AUTHOR_NAME` / `GIT_AUTHOR_EMAIL` - Identity to use when creating commits in the catalog repo
+- `MODEL_MANAGER_API_TOKEN` - Optional bearer token required for mutating endpoints (activation, installs, PRs)
 
 ## API Endpoints
 
 - `GET /healthz` - Health check
+- `GET /metrics` - Prometheus metrics (request counts, durations, PVC usage)
 - `GET /models` - List available models (cached)
 - `GET /models/{id}` - Get details for a specific model
+- `GET /models/{id}/compatibility` - Estimate if the catalog entry fits on a GPU type (or all known GPUs)
 - `POST /models/activate` - Activate a model (body: `{"id": "model-id"}`)
 - `POST /models/deactivate` - Deactivate the active model
+- `POST /models/test` - Dry-run the InferenceService manifest (and optional readiness URL ping)
 - `GET /active` - Get information about the currently active model
 - `POST /refresh` - Manually force catalog reload
+- `POST /catalog/generate` - Generate a catalog JSON stub (wrapper around discovery helpers)
+- `POST /catalog/validate` - Validate a catalog entry against schema + cluster resources
+- `POST /catalog/pr` - Save a catalog entry, commit it, and open a GitHub pull request
+- `GET /recommendations/{gpuType}` - Suggested vLLM flags/notes for the GPU profile
 - `GET /weights` - List all installed weight directories
 - `GET /weights/usage` - PVC usage statistics
 - `GET /weights/{name}/info` - Inspect a specific weight directory
@@ -46,8 +60,8 @@ HTTP API service for dynamically managing KServe InferenceServices based on mode
 ## Building
 
 ```bash
-docker build -t ghcr.io/oremus-labs/ol-model-manager:0.3.3-go .
-docker push ghcr.io/oremus-labs/ol-model-manager:0.3.3-go
+docker build -t ghcr.io/oremus-labs/ol-model-manager:0.4.0-go .
+docker push ghcr.io/oremus-labs/ol-model-manager:0.4.0-go
 ```
 
 ## Running Locally
