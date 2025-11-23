@@ -113,8 +113,11 @@ class KServeClient:
 
     def _build_inferenceservice(self, model_config: dict) -> dict:
         """Build an InferenceService manifest from model config."""
-        # Base InferenceService structure
-        storage_uri = model_config.get("storageUri", f"hf://{model_config['hfModelId']}")
+        # Base InferenceService structure. Allow storageUri to be explicitly disabled (None) so
+        # the runtime can pull models directly when desired.
+        storage_uri = model_config.get("storageUri")
+        if not storage_uri and model_config.get("hfModelId"):
+            storage_uri = f"hf://{model_config['hfModelId']}"
 
         isvc = {
             "apiVersion": f"{self.group}/{self.version}",
@@ -134,12 +137,14 @@ class KServeClient:
                         "modelFormat": {
                             "name": "custom"
                         },
-                        "runtime": model_config.get("runtime", "qwen-vllm-runtime"),
-                        "storageUri": storage_uri
+                        "runtime": model_config.get("runtime", "qwen-vllm-runtime")
                     }
                 }
             }
         }
+
+        if storage_uri:
+            isvc["spec"]["predictor"]["model"]["storageUri"] = storage_uri
 
         # Attach storage settings when provided so KServe knows which volume to mount.
         if "storage" in model_config:
