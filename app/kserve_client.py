@@ -45,22 +45,30 @@ class KServeClient:
                 plural=self.plural,
                 name=self.inferenceservice_name
             )
-            logger.info("Existing InferenceService detected; deleting to free resources")
-            self.deactivate_model()
-            self._wait_for_deletion()
-        except ApiException as e:
-            if e.status != 404:
-                raise
 
-        logger.info(f"Creating InferenceService: {self.inferenceservice_name}")
-        self.custom_api.create_namespaced_custom_object(
-            group=self.group,
-            version=self.version,
-            namespace=self.namespace,
-            plural=self.plural,
-            body=inference_service
-        )
-        return {"action": "created", "name": self.inferenceservice_name}
+            logger.info(f"Updating existing InferenceService: {self.inferenceservice_name}")
+            self.custom_api.patch_namespaced_custom_object(
+                group=self.group,
+                version=self.version,
+                namespace=self.namespace,
+                plural=self.plural,
+                name=self.inferenceservice_name,
+                body=inference_service
+            )
+            return {"action": "updated", "name": self.inferenceservice_name}
+
+        except ApiException as e:
+            if e.status == 404:
+                logger.info(f"Creating InferenceService: {self.inferenceservice_name}")
+                self.custom_api.create_namespaced_custom_object(
+                    group=self.group,
+                    version=self.version,
+                    namespace=self.namespace,
+                    plural=self.plural,
+                    body=inference_service
+                )
+                return {"action": "created", "name": self.inferenceservice_name}
+            raise
 
     def deactivate_model(self) -> dict:
         """Delete the active InferenceService."""
@@ -201,22 +209,3 @@ class KServeClient:
                 args.extend([flag, str(value)])
 
         return args
-
-    def _wait_for_deletion(self, timeout: int = 300, interval: int = 2):
-        """Wait until the InferenceService no longer exists."""
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            try:
-                self.custom_api.get_namespaced_custom_object(
-                    group=self.group,
-                    version=self.version,
-                    namespace=self.namespace,
-                    plural=self.plural,
-                    name=self.inferenceservice_name
-                )
-                time.sleep(interval)
-            except ApiException as e:
-                if e.status == 404:
-                    return
-                raise
-        raise TimeoutError(f"InferenceService {self.inferenceservice_name} still exists after {timeout}s")
