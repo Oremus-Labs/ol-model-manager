@@ -18,7 +18,7 @@ HTTP API service for dynamically managing KServe InferenceServices based on mode
 - `CATALOG_REFRESH_INTERVAL` - TTL before models are reloaded from disk (default: `30s`)
 - `ACTIVE_NAMESPACE` - Kubernetes namespace for InferenceServices (default: `ai`)
 - `ACTIVE_INFERENCESERVICE_NAME` - Name of the InferenceService to manage (default: `active-llm`)
-- `WEIGHTS_STORAGE_PATH` - Root directory for cached weights on the PVC (default: `/mnt/model-storage`)
+- `WEIGHTS_STORAGE_PATH` - Root directory for cached weights on the PVC (default: `/mnt/models`)
 - `WEIGHTS_INSTALL_TIMEOUT` - Timeout for weight installation operations (default: `30m`)
 - `WEIGHTS_PVC_NAME` - Name of the PVC backing the cache (default: `venus-model-storage`)
 - `INFERENCE_MODEL_ROOT` - Path where KServe mounts the PVC inside runtime containers (default: `/mnt/models`)
@@ -46,8 +46,8 @@ HTTP API service for dynamically managing KServe InferenceServices based on mode
 ## Building
 
 ```bash
-docker build -t ghcr.io/oremus-labs/ol-model-manager:0.3.1-go .
-docker push ghcr.io/oremus-labs/ol-model-manager:0.3.1-go
+docker build -t ghcr.io/oremus-labs/ol-model-manager:0.3.2-go .
+docker push ghcr.io/oremus-labs/ol-model-manager:0.3.2-go
 ```
 
 ## Running Locally

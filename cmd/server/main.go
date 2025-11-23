@@ -20,7 +20,7 @@ import (
 )
 
 const (
-	version         = "0.3.1-go"
+	version         = "0.3.2-go"
 	shutdownTimeout = 5 * time.Second
 )
 

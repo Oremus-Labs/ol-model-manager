@@ -43,7 +43,7 @@ func Load() *Config {
 		CatalogRefreshInterval: getEnvDuration("CATALOG_REFRESH_INTERVAL", 30*time.Second),
 		Namespace:              getEnv("ACTIVE_NAMESPACE", "ai"),
 		InferenceServiceName:   getEnv("ACTIVE_INFERENCESERVICE_NAME", "active-llm"),
-		WeightsStoragePath:     getEnv("WEIGHTS_STORAGE_PATH", "/mnt/model-storage"),
+		WeightsStoragePath:     getEnv("WEIGHTS_STORAGE_PATH", "/mnt/models"),
 		WeightsInstallTimeout:  getEnvDuration("WEIGHTS_INSTALL_TIMEOUT", 30*time.Minute),
 		WeightsPVCName:         getEnv("WEIGHTS_PVC_NAME", "venus-model-storage"),
 		InferenceModelRoot:     getEnv("INFERENCE_MODEL_ROOT", "/mnt/models"),
