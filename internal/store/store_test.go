@@ -1,0 +1,75 @@
+package store
+
+import (
+	"path/filepath"
+	"testing"
+)
+
+func TestStoreJobsAndHistory(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatalf("failed to open store: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = s.Close()
+	})
+
+	job := &Job{ID: "job-1", Type: "weight_install"}
+	if err := s.CreateJob(job); err != nil {
+		t.Fatalf("CreateJob: %v", err)
+	}
+
+	job.Status = JobRunning
+	if err := s.UpdateJob(job); err != nil {
+		t.Fatalf("UpdateJob: %v", err)
+	}
+
+	stored, err := s.GetJob("job-1")
+	if err != nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	if stored.Status != JobRunning {
+		t.Fatalf("expected status %s got %s", JobRunning, stored.Status)
+	}
+
+	jobs, err := s.ListJobs(5)
+	if err != nil {
+		t.Fatalf("ListJobs: %v", err)
+	}
+	if len(jobs) != 1 {
+		t.Fatalf("expected 1 job got %d", len(jobs))
+	}
+
+	if err := s.AppendHistory(&HistoryEntry{
+		Event:   "weight_install_completed",
+		ModelID: "foo",
+	}); err != nil {
+		t.Fatalf("AppendHistory: %v", err)
+	}
+
+	history, err := s.ListHistory(1)
+	if err != nil {
+		t.Fatalf("ListHistory: %v", err)
+	}
+	if len(history) != 1 || history[0].Event != "weight_install_completed" {
+		t.Fatalf("unexpected history payload: %+v", history)
+	}
+}
+
+func TestOpenCreatesDirectory(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "nested")
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = s.Close()
+	})
+}

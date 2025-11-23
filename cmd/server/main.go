@@ -18,9 +18,11 @@ import (
 	"github.com/oremus-labs/ol-model-manager/internal/catalog"
 	"github.com/oremus-labs/ol-model-manager/internal/catalogwriter"
 	"github.com/oremus-labs/ol-model-manager/internal/handlers"
+	"github.com/oremus-labs/ol-model-manager/internal/jobs"
 	"github.com/oremus-labs/ol-model-manager/internal/kserve"
 	"github.com/oremus-labs/ol-model-manager/internal/kube"
 	"github.com/oremus-labs/ol-model-manager/internal/recommendations"
+	"github.com/oremus-labs/ol-model-manager/internal/store"
 	"github.com/oremus-labs/ol-model-manager/internal/validator"
 	"github.com/oremus-labs/ol-model-manager/internal/vllm"
 	"github.com/oremus-labs/ol-model-manager/internal/weights"
@@ -31,7 +33,7 @@ import (
 )
 
 const (
-	version         = "0.4.3-go"
+	version         = "0.4.4-go"
 	shutdownTimeout = 5 * time.Second
 )
 
@@ -95,6 +97,14 @@ func main() {
 		vllm.WithHuggingFaceToken(cfg.HuggingFaceToken),
 	)
 
+	stateStore, err := store.Open(cfg.StatePath)
+	if err != nil {
+		log.Fatalf("Failed to initialize state store: %v", err)
+	}
+	defer stateStore.Close()
+
+	jobManager := jobs.New(stateStore, weightManager, cfg.HuggingFaceToken)
+
 	// Initialize catalog validator
 	catalogValidator, err := validator.New(validator.Options{
 		SchemaPath:         cfg.CatalogSchemaPath,
@@ -136,13 +146,20 @@ func main() {
 	}
 
 	// Initialize handlers
-	h := handlers.New(cat, ksClient, weightManager, vllmDiscovery, catalogValidator, catWriter, advisor, handlers.Options{
+	h := handlers.New(cat, ksClient, weightManager, vllmDiscovery, catalogValidator, catWriter, advisor, stateStore, jobManager, handlers.Options{
 		CatalogTTL:            cfg.CatalogRefreshInterval,
 		WeightsInstallTimeout: cfg.WeightsInstallTimeout,
 		HuggingFaceToken:      cfg.HuggingFaceToken,
 		GitHubToken:           cfg.GitHubToken,
 		WeightsPVCName:        cfg.WeightsPVCName,
 		InferenceModelRoot:    cfg.InferenceModelRoot,
+		HistoryLimit:          100,
+		Version:               version,
+		CatalogRoot:           cfg.CatalogRoot,
+		CatalogModelsDir:      cfg.CatalogModelsDir,
+		WeightsPath:           cfg.WeightsStoragePath,
+		StatePath:             cfg.StatePath,
+		AuthEnabled:           cfg.APIToken != "",
 	})
 
 	startWeightMonitor(rootCtx, weightManager)
@@ -192,23 +209,31 @@ func setupRouter(h *handlers.Handler, apiToken string) *gin.Engine {
 
 	// Health check
 	router.GET("/healthz", h.Health)
+	router.GET("/system/info", h.SystemInfo)
 	router.GET("/metrics", gin.WrapH(promhttp.Handler()))
 
 	// Model endpoints
 	router.GET("/models", h.ListModels)
 	router.GET("/models/:id", h.GetModel)
 	router.GET("/models/:id/compatibility", h.ModelCompatibility)
+	router.GET("/models/:id/manifest", h.GetModelManifest)
 	router.GET("/active", h.GetActiveModel)
 	router.POST("/catalog/generate", h.GenerateCatalogEntry)
 	router.GET("/recommendations/:gpuType", h.GPURecommendations)
+	router.GET("/recommendations/profiles", h.ListProfiles)
 
 	// Weight endpoints
 	router.GET("/weights", h.ListWeights)
 	router.GET("/weights/usage", h.GetWeightUsage)
 	router.GET("/weights/:name/info", h.GetWeightInfo)
 
+	// HuggingFace discovery
+	router.GET("/huggingface/search", h.SearchHuggingFace)
+	router.GET("/huggingface/models/:id", h.GetHuggingFaceModel)
+
 	// vLLM discovery endpoints
 	router.GET("/vllm/supported-models", h.ListVLLMArchitectures)
+	router.GET("/vllm/model/:architecture", h.GetVLLMArchitecture)
 	router.POST("/vllm/discover", h.DiscoverModel)
 	router.POST("/vllm/model-info", h.DescribeVLLMModel)
 
@@ -217,11 +242,15 @@ func setupRouter(h *handlers.Handler, apiToken string) *gin.Engine {
 	protected.POST("/models/activate", h.ActivateModel)
 	protected.POST("/models/deactivate", h.DeactivateModel)
 	protected.POST("/models/test", h.TestModel)
+	protected.POST("/catalog/preview", h.PreviewCatalog)
 	protected.POST("/refresh", h.RefreshCatalog)
 	protected.POST("/catalog/validate", h.ValidateCatalog)
 	protected.POST("/catalog/pr", h.CreateCatalogPR)
 	protected.POST("/weights/install", h.InstallWeights)
 	protected.DELETE("/weights/:name", h.DeleteWeights)
+	protected.GET("/jobs", h.ListJobs)
+	protected.GET("/jobs/:id", h.GetJob)
+	protected.GET("/history", h.ListHistory)
 
 	return router
 }

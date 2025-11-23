@@ -2,12 +2,15 @@
 package vllm
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -51,8 +54,17 @@ type ModelArchitecture struct {
 	Name        string   `json:"name"`
 	ClassName   string   `json:"className"`
 	FilePath    string   `json:"filePath"`
+	DownloadURL string   `json:"downloadUrl,omitempty"`
+	SHA         string   `json:"sha,omitempty"`
+	Size        int      `json:"size,omitempty"`
 	Aliases     []string `json:"aliases,omitempty"`
 	Description string   `json:"description,omitempty"`
+}
+
+// ArchitectureDetail includes file source content for UI previews.
+type ArchitectureDetail struct {
+	ModelArchitecture
+	Source string `json:"source"`
 }
 
 // HuggingFaceModel represents a model from HuggingFace.
@@ -132,9 +144,12 @@ func (d *Discovery) ListSupportedArchitectures() ([]ModelArchitecture, error) {
 	}
 
 	var files []struct {
-		Name string `json:"name"`
-		Path string `json:"path"`
-		Type string `json:"type"`
+		Name        string `json:"name"`
+		Path        string `json:"path"`
+		Type        string `json:"type"`
+		DownloadURL string `json:"download_url"`
+		SHA         string `json:"sha"`
+		Size        int    `json:"size"`
 	}
 
 	if err := json.NewDecoder(resp.Body).Decode(&files); err != nil {
@@ -155,9 +170,12 @@ func (d *Discovery) ListSupportedArchitectures() ([]ModelArchitecture, error) {
 
 		name := strings.TrimSuffix(file.Name, ".py")
 		arch := ModelArchitecture{
-			Name:      name,
-			ClassName: toPascalCase(name),
-			FilePath:  file.Path,
+			Name:        name,
+			ClassName:   toPascalCase(name),
+			FilePath:    file.Path,
+			DownloadURL: file.DownloadURL,
+			SHA:         file.SHA,
+			Size:        file.Size,
 		}
 		architectures = append(architectures, arch)
 		cache[strings.ToLower(name)] = arch
@@ -212,6 +230,57 @@ func (d *Discovery) GenerateModelConfig(req GenerateRequest) (*catalog.Model, er
 		return nil, err
 	}
 	return d.buildCatalogModel(hfModel, req), nil
+}
+
+// GetArchitectureDetail fetches and returns the source for an architecture file.
+func (d *Discovery) GetArchitectureDetail(name string) (*ArchitectureDetail, error) {
+	if name == "" {
+		return nil, fmt.Errorf("architecture name is required")
+	}
+	arch, err := d.lookupArchitecture(name)
+	if err != nil {
+		return nil, err
+	}
+
+	url := fmt.Sprintf("https://api.github.com/repos/vllm-project/vllm/contents/%s", arch.FilePath)
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/vnd.github.v3+json")
+	if d.githubToken != "" {
+		req.Header.Set("Authorization", "Bearer "+d.githubToken)
+	}
+
+	resp, err := d.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return nil, fmt.Errorf("GitHub API returned %d: %s", resp.StatusCode, string(body))
+	}
+
+	var payload struct {
+		Content  string `json:"content"`
+		Encoding string `json:"encoding"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return nil, err
+	}
+	source := payload.Content
+	if strings.EqualFold(payload.Encoding, "base64") {
+		if decoded, err := decodeBase64(payload.Content); err == nil {
+			source = decoded
+		}
+	}
+
+	return &ArchitectureDetail{
+		ModelArchitecture: arch,
+		Source:            source,
+	}, nil
 }
 
 func (d *Discovery) buildCatalogModel(hfModel *HuggingFaceModel, req GenerateRequest) *catalog.Model {
@@ -311,6 +380,67 @@ func (d *Discovery) DescribeModel(hfModelID string, autoDetect bool) (*ModelInsi
 	return insight, nil
 }
 
+// SearchModels queries Hugging Face for discoverable models.
+func (d *Discovery) SearchModels(query string, limit int) ([]*ModelInsight, error) {
+	if limit <= 0 || limit > 25 {
+		limit = 10
+	}
+
+	params := url.Values{}
+	if query != "" {
+		params.Set("search", query)
+	} else {
+		params.Set("sort", "downloads")
+	}
+	params.Set("limit", strconv.Itoa(limit))
+
+	reqURL := fmt.Sprintf("%s?%s", hfAPIURL, params.Encode())
+	req, err := http.NewRequest(http.MethodGet, reqURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	if d.hfToken != "" {
+		req.Header.Set("Authorization", "Bearer "+d.hfToken)
+	}
+
+	resp, err := d.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return nil, fmt.Errorf("HuggingFace search returned %d: %s", resp.StatusCode, string(body))
+	}
+
+	var models []HuggingFaceModel
+	if err := json.NewDecoder(resp.Body).Decode(&models); err != nil {
+		return nil, err
+	}
+
+	results := make([]*ModelInsight, 0, len(models))
+	for _, model := range models {
+		id := model.ModelID
+		if id == "" {
+			id = model.ID
+		}
+		if id == "" {
+			continue
+		}
+		insight, err := d.DescribeModel(id, true)
+		if err != nil {
+			continue
+		}
+		results = append(results, insight)
+		if len(results) >= limit {
+			break
+		}
+	}
+
+	return results, nil
+}
+
 func requiresTrustRemoteCode(architecture string) bool {
 	// Architectures that typically require trust_remote_code
 	requireTrust := []string{
@@ -337,6 +467,31 @@ func mapTorchDtype(torchDtype string) string {
 	default:
 		return "auto"
 	}
+}
+
+func (d *Discovery) lookupArchitecture(name string) (ModelArchitecture, error) {
+	if name == "" {
+		return ModelArchitecture{}, fmt.Errorf("architecture name is required")
+	}
+	target := strings.ToLower(name)
+
+	d.supportedMu.RLock()
+	if arch, ok := d.supportedArch[target]; ok {
+		d.supportedMu.RUnlock()
+		return arch, nil
+	}
+	d.supportedMu.RUnlock()
+
+	if _, err := d.ListSupportedArchitectures(); err != nil {
+		return ModelArchitecture{}, err
+	}
+
+	d.supportedMu.RLock()
+	defer d.supportedMu.RUnlock()
+	if arch, ok := d.supportedArch[target]; ok {
+		return arch, nil
+	}
+	return ModelArchitecture{}, fmt.Errorf("architecture not found: %s", name)
 }
 
 func generateModelID(hfModelID string) string {
@@ -482,4 +637,13 @@ func extractArchitectures(model *HuggingFaceModel) []string {
 		result = append(result, fmt.Sprintf("%v", item))
 	}
 	return result
+}
+
+func decodeBase64(value string) (string, error) {
+	clean := strings.ReplaceAll(value, "\n", "")
+	decoded, err := base64.StdEncoding.DecodeString(clean)
+	if err != nil {
+		return "", err
+	}
+	return string(decoded), nil
 }

@@ -11,14 +11,18 @@ import (
 	"path"
 	"reflect"
 	"regexp"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/oremus-labs/ol-model-manager/internal/catalog"
 	"github.com/oremus-labs/ol-model-manager/internal/catalogwriter"
+	"github.com/oremus-labs/ol-model-manager/internal/jobs"
 	"github.com/oremus-labs/ol-model-manager/internal/kserve"
 	"github.com/oremus-labs/ol-model-manager/internal/recommendations"
+	"github.com/oremus-labs/ol-model-manager/internal/store"
 	"github.com/oremus-labs/ol-model-manager/internal/validator"
 	"github.com/oremus-labs/ol-model-manager/internal/vllm"
 	"github.com/oremus-labs/ol-model-manager/internal/weights"
@@ -32,6 +36,13 @@ type Options struct {
 	GitHubToken           string
 	WeightsPVCName        string
 	InferenceModelRoot    string
+	HistoryLimit          int
+	Version               string
+	CatalogRoot           string
+	CatalogModelsDir      string
+	WeightsPath           string
+	StatePath             string
+	AuthEnabled           bool
 }
 
 type weightStore interface {
@@ -44,9 +55,11 @@ type weightStore interface {
 
 type discoveryService interface {
 	ListSupportedArchitectures() ([]vllm.ModelArchitecture, error)
+	GetArchitectureDetail(string) (*vllm.ArchitectureDetail, error)
 	GenerateModelConfig(vllm.GenerateRequest) (*catalog.Model, error)
 	GetHuggingFaceModel(string) (*vllm.HuggingFaceModel, error)
 	DescribeModel(string, bool) (*vllm.ModelInsight, error)
+	SearchModels(string, int) ([]*vllm.ModelInsight, error)
 }
 
 type catalogValidator interface {
@@ -57,6 +70,10 @@ type catalogWriter interface {
 	Save(*catalog.Model) (*catalogwriter.SaveResult, error)
 	CommitAndPush(context.Context, string, string, string, ...string) error
 	CreatePullRequest(context.Context, catalogwriter.PullRequestOptions) (*catalogwriter.PullRequest, error)
+}
+
+type jobManager interface {
+	EnqueueWeightInstall(jobs.InstallRequest) (*store.Job, error)
 }
 
 type recommendationService interface {
@@ -75,6 +92,8 @@ type Handler struct {
 	checker catalogValidator
 	writer  catalogWriter
 	advisor recommendationService
+	store   *store.Store
+	jobs    jobManager
 	opts    Options
 
 	catalogMu          sync.Mutex
@@ -82,7 +101,7 @@ type Handler struct {
 }
 
 // New creates a new Handler instance.
-func New(cat *catalog.Catalog, ks *kserve.Client, wm weightStore, vdisc discoveryService, val catalogValidator, writer catalogWriter, advisor recommendationService, opts Options) *Handler {
+func New(cat *catalog.Catalog, ks *kserve.Client, wm weightStore, vdisc discoveryService, val catalogValidator, writer catalogWriter, advisor recommendationService, dataStore *store.Store, jobMgr jobManager, opts Options) *Handler {
 	if opts.CatalogTTL <= 0 {
 		opts.CatalogTTL = time.Minute
 	}
@@ -91,6 +110,12 @@ func New(cat *catalog.Catalog, ks *kserve.Client, wm weightStore, vdisc discover
 	}
 	if opts.InferenceModelRoot == "" {
 		opts.InferenceModelRoot = "/mnt/models"
+	}
+	if opts.HistoryLimit <= 0 {
+		opts.HistoryLimit = 50
+	}
+	if opts.WeightsPath == "" {
+		opts.WeightsPath = opts.InferenceModelRoot
 	}
 
 	if advisor != nil && isNilInterface(advisor) {
@@ -105,6 +130,8 @@ func New(cat *catalog.Catalog, ks *kserve.Client, wm weightStore, vdisc discover
 		checker:            val,
 		writer:             writer,
 		advisor:            advisor,
+		store:              dataStore,
+		jobs:               jobMgr,
 		opts:               opts,
 		lastCatalogRefresh: time.Now(),
 	}
@@ -123,8 +150,8 @@ type installWeightsRequest struct {
 }
 
 type modelInfoRequest struct {
-	HFModelID string `json:"hfModelId" binding:"required"`
-	AutoDetect bool  `json:"autoDetect"`
+	HFModelID  string `json:"hfModelId" binding:"required"`
+	AutoDetect bool   `json:"autoDetect"`
 }
 
 type testModelRequest struct {
@@ -157,6 +184,54 @@ type catalogPRRequest struct {
 // Health returns the health status of the service.
 func (h *Handler) Health(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
+}
+
+// SystemInfo exposes metadata for UI bootstrapping.
+func (h *Handler) SystemInfo(c *gin.Context) {
+	catalogInfo := gin.H{
+		"root":        h.opts.CatalogRoot,
+		"modelsDir":   h.opts.CatalogModelsDir,
+		"count":       0,
+		"lastRefresh": h.lastCatalogRefresh,
+	}
+	if h.catalog != nil {
+		catalogInfo["count"] = h.catalog.Count()
+	}
+
+	info := gin.H{
+		"version": h.opts.Version,
+		"catalog": catalogInfo,
+		"weights": gin.H{
+			"path":    h.opts.WeightsPath,
+			"pvcName": h.opts.WeightsPVCName,
+		},
+		"state": gin.H{
+			"path":    h.opts.StatePath,
+			"enabled": h.store != nil,
+		},
+		"auth": gin.H{
+			"enabled": h.opts.AuthEnabled,
+		},
+	}
+
+	if h.weights != nil {
+		if stats, err := h.weights.GetStats(); err == nil {
+			info["storage"] = stats
+		}
+	}
+	if h.advisor != nil {
+		info["gpuProfiles"] = h.advisor.Profiles()
+	}
+	if h.store != nil {
+		if jobs, err := h.store.ListJobs(10); err == nil {
+			info["recentJobs"] = jobs
+		}
+		if history, err := h.store.ListHistory(5); err == nil {
+			info["recentHistory"] = history
+		}
+	}
+
+	c.JSON(http.StatusOK, info)
 }
 
 // ListModels returns all available models.
@@ -224,6 +299,10 @@ func (h *Handler) ActivateModel(c *gin.Context) {
 		"model":            model,
 		"inferenceservice": result,
 	})
+
+	h.recordHistory("model_activated", req.ID, map[string]interface{}{
+		"action": result.Action,
+	})
 }
 
 // DeactivateModel deactivates the active model.
@@ -242,6 +321,10 @@ func (h *Handler) DeactivateModel(c *gin.Context) {
 		"status":  "success",
 		"message": "Active model deactivated",
 		"result":  result,
+	})
+
+	h.recordHistory("model_deactivated", "", map[string]interface{}{
+		"action": result.Action,
 	})
 }
 
@@ -407,6 +490,8 @@ func (h *Handler) DeleteWeights(c *gin.Context) {
 		"status":  "success",
 		"message": "Deleted weights for " + name,
 	})
+
+	h.recordHistory("weight_deleted", name, nil)
 }
 
 // GetWeightUsage returns PVC usage statistics.
@@ -455,6 +540,23 @@ func (h *Handler) InstallWeights(c *gin.Context) {
 		return
 	}
 
+	if h.jobs != nil {
+		job, err := h.jobs.EnqueueWeightInstall(jobs.InstallRequest{
+			ModelID:   req.HFModelID,
+			Revision:  req.Revision,
+			Target:    req.Target,
+			Files:     files,
+			Overwrite: req.Overwrite,
+		})
+		if err != nil {
+			log.Printf("Failed to enqueue weight install: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusAccepted, gin.H{"status": "queued", "job": job})
+		return
+	}
+
 	ctx, cancel := context.WithTimeout(c.Request.Context(), h.opts.WeightsInstallTimeout)
 	defer cancel()
 
@@ -489,6 +591,10 @@ func (h *Handler) InstallWeights(c *gin.Context) {
 		response["catalogInstructions"] = fmt.Sprintf("Set storageUri to %s and MODEL_ID (or equivalent env) to %s", storageURI, modelPath)
 	}
 
+	h.recordHistory("weight_install_completed", req.HFModelID, map[string]interface{}{
+		"target": info.Name,
+	})
+
 	c.JSON(http.StatusOK, response)
 }
 
@@ -507,6 +613,29 @@ func (h *Handler) ListVLLMArchitectures(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"architectures": architectures})
+}
+
+// GetVLLMArchitecture returns details for one architecture.
+func (h *Handler) GetVLLMArchitecture(c *gin.Context) {
+	if h.vllm == nil {
+		c.JSON(http.StatusNotImplemented, gin.H{"error": "vLLM discovery is disabled"})
+		return
+	}
+	name := c.Param("architecture")
+	if name == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "architecture is required"})
+		return
+	}
+	detail, err := h.vllm.GetArchitectureDetail(name)
+	if err != nil {
+		status := http.StatusInternalServerError
+		if strings.Contains(err.Error(), "not found") {
+			status = http.StatusNotFound
+		}
+		c.JSON(status, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, detail)
 }
 
 // DiscoverModel generates a catalog entry for a HuggingFace model.
@@ -555,9 +684,10 @@ func (h *Handler) DescribeVLLMModel(c *gin.Context) {
 	response := gin.H{"insight": info}
 
 	if h.advisor != nil && info.SuggestedCatalog != nil {
-		var recs []recommendations.Recommendation
-		var compat []recommendations.CompatibilityReport
-		for _, profile := range h.advisor.Profiles() {
+		profiles := h.advisor.Profiles()
+		recs := make([]recommendations.Recommendation, 0, len(profiles))
+		compat := make([]recommendations.CompatibilityReport, 0, len(profiles))
+		for _, profile := range profiles {
 			recs = append(recs, h.advisor.RecommendForModel(info.SuggestedCatalog, profile.Name))
 			compat = append(compat, h.advisor.Compatibility(info.SuggestedCatalog, profile.Name))
 		}
@@ -566,6 +696,47 @@ func (h *Handler) DescribeVLLMModel(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, response)
+}
+
+// GetHuggingFaceModel exposes metadata via REST-friendly GET.
+func (h *Handler) GetHuggingFaceModel(c *gin.Context) {
+	if h.vllm == nil {
+		c.JSON(http.StatusNotImplemented, gin.H{"error": "vLLM discovery is disabled"})
+		return
+	}
+	id := c.Param("id")
+	autoDetect := c.Query("autoDetect") == "true"
+
+	info, err := h.vllm.DescribeModel(id, autoDetect)
+	if err != nil {
+		status := http.StatusInternalServerError
+		if strings.Contains(err.Error(), "not found") {
+			status = http.StatusNotFound
+		}
+		c.JSON(status, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"insight": info})
+}
+
+// SearchHuggingFace proxies HF search for discoverability.
+func (h *Handler) SearchHuggingFace(c *gin.Context) {
+	if h.vllm == nil {
+		c.JSON(http.StatusNotImplemented, gin.H{"error": "vLLM discovery is disabled"})
+		return
+	}
+
+	query := c.Query("q")
+	limit := parseLimit(c, "limit", 10, 25)
+
+	results, err := h.vllm.SearchModels(query, limit)
+	if err != nil {
+		log.Printf("Failed to search HuggingFace: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"results": results})
 }
 
 // GenerateCatalogEntry produces a draft catalog model with optional overrides.
@@ -714,6 +885,101 @@ func (h *Handler) CreateCatalogPR(c *gin.Context) {
 	c.JSON(http.StatusOK, response)
 }
 
+// GetModelManifest renders the KServe manifest for an existing catalog entry.
+func (h *Handler) GetModelManifest(c *gin.Context) {
+	if err := h.ensureCatalogFresh(false); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load model catalog"})
+		return
+	}
+
+	modelID := c.Param("id")
+	model := h.catalog.Get(modelID)
+	if model == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "model not found"})
+		return
+	}
+
+	manifest := h.kserve.RenderManifest(model)
+	c.JSON(http.StatusOK, gin.H{"manifest": manifest, "model": model})
+}
+
+// PreviewCatalog validates an ad-hoc catalog entry and returns the manifest.
+func (h *Handler) PreviewCatalog(c *gin.Context) {
+	var model catalog.Model
+	if err := c.ShouldBindJSON(&model); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	result := gin.H{"model": model}
+	if h.checker != nil {
+		validation := h.checker.Validate(c.Request.Context(), nil, &model)
+		result["validation"] = validation
+		if !validation.Valid {
+			result["status"] = "warning"
+		}
+	}
+
+	result["manifest"] = h.kserve.RenderManifest(&model)
+
+	c.JSON(http.StatusOK, result)
+}
+
+// ListJobs returns recent asynchronous jobs.
+func (h *Handler) ListJobs(c *gin.Context) {
+	if h.store == nil {
+		c.JSON(http.StatusNotImplemented, gin.H{"error": "persistent store not configured"})
+		return
+	}
+	limit := parseLimit(c, "limit", h.opts.HistoryLimit, 200)
+	jobs, err := h.store.ListJobs(limit)
+	if err != nil {
+		log.Printf("Failed to list jobs: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"jobs": jobs})
+}
+
+// GetJob returns a single job status.
+func (h *Handler) GetJob(c *gin.Context) {
+	if h.store == nil {
+		c.JSON(http.StatusNotImplemented, gin.H{"error": "persistent store not configured"})
+		return
+	}
+	job, err := h.store.GetJob(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "job not found"})
+		return
+	}
+	c.JSON(http.StatusOK, job)
+}
+
+// ListHistory returns historical deployment/install events.
+func (h *Handler) ListHistory(c *gin.Context) {
+	if h.store == nil {
+		c.JSON(http.StatusNotImplemented, gin.H{"error": "persistent store not configured"})
+		return
+	}
+	limit := parseLimit(c, "limit", h.opts.HistoryLimit, 200)
+	entries, err := h.store.ListHistory(limit)
+	if err != nil {
+		log.Printf("Failed to list history: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"events": entries})
+}
+
+// ListProfiles exposes GPU profiles for the frontend.
+func (h *Handler) ListProfiles(c *gin.Context) {
+	if h.advisor == nil {
+		c.JSON(http.StatusNotImplemented, gin.H{"error": "recommendations disabled"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"profiles": h.advisor.Profiles()})
+}
+
 // ModelCompatibility reports whether a catalog entry fits on the requested GPU.
 func (h *Handler) ModelCompatibility(c *gin.Context) {
 	if h.advisor == nil {
@@ -809,6 +1075,41 @@ func modelDisplayName(model *catalog.Model) string {
 		return model.DisplayName
 	}
 	return model.ID
+}
+
+func (h *Handler) recordHistory(event, modelID string, meta map[string]interface{}) {
+	if h.store == nil {
+		return
+	}
+	if meta == nil {
+		meta = map[string]interface{}{}
+	}
+	entry := &store.HistoryEntry{
+		Event:    event,
+		ModelID:  modelID,
+		Metadata: meta,
+	}
+	if err := h.store.AppendHistory(entry); err != nil {
+		log.Printf("Failed to append history: %v", err)
+	}
+}
+
+func parseLimit(c *gin.Context, key string, def, max int) int {
+	if max <= 0 {
+		max = 100
+	}
+	val := c.Query(key)
+	if val == "" {
+		return def
+	}
+	n, err := strconv.Atoi(val)
+	if err != nil || n <= 0 {
+		return def
+	}
+	if n > max {
+		return max
+	}
+	return n
 }
 
 func isNilInterface(value interface{}) bool {

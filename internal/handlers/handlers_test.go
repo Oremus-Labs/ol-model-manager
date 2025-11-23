@@ -32,7 +32,7 @@ func TestListWeights(t *testing.T) {
 		}},
 	}
 
-	handler := New(nil, nil, store, nil, nil, nil, nil, Options{})
+	handler := New(nil, nil, store, nil, nil, nil, nil, nil, nil, Options{})
 
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
@@ -76,7 +76,7 @@ func TestInstallWeightsDerivesFilesFromHuggingFace(t *testing.T) {
 		},
 	}
 
-	handler := New(nil, nil, store, discovery, nil, nil, nil, Options{
+	handler := New(nil, nil, store, discovery, nil, nil, nil, nil, nil, Options{
 		WeightsPVCName:     "venus-model-storage",
 		InferenceModelRoot: "/mnt/models",
 	})
@@ -123,7 +123,7 @@ func TestInstallWeightsDerivesFilesFromHuggingFace(t *testing.T) {
 func TestInstallWeightsRejectsInvalidHFID(t *testing.T) {
 	t.Parallel()
 
-	handler := New(nil, nil, &fakeWeightStore{}, &fakeDiscovery{}, nil, nil, nil, Options{})
+	handler := New(nil, nil, &fakeWeightStore{}, &fakeDiscovery{}, nil, nil, nil, nil, nil, Options{})
 
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
@@ -145,7 +145,7 @@ func TestGenerateCatalogEntry(t *testing.T) {
 		modelResp: &catalog.Model{ID: "draft-model", HFModelID: "foo/bar"},
 	}
 
-	handler := New(nil, nil, nil, discovery, nil, nil, nil, Options{})
+	handler := New(nil, nil, nil, discovery, nil, nil, nil, nil, nil, Options{})
 
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
@@ -184,7 +184,7 @@ func TestCreateCatalogPR(t *testing.T) {
 		},
 	}
 
-	handler := New(nil, nil, nil, nil, nil, writer, nil, Options{
+	handler := New(nil, nil, nil, nil, nil, writer, nil, nil, nil, Options{
 		GitHubToken: "token",
 	})
 
@@ -222,13 +222,13 @@ func TestDescribeVLLMModel(t *testing.T) {
 
 	discovery := &fakeDiscovery{
 		modelInfo: &vllm.ModelInsight{
-			Compatible: true,
+			Compatible:           true,
 			MatchedArchitectures: []string{"qwen"},
-			SuggestedCatalog: &catalog.Model{ID: "foo"},
+			SuggestedCatalog:     &catalog.Model{ID: "foo"},
 		},
 	}
 
-	handler := New(nil, nil, nil, discovery, nil, nil, &fakeAdvisor{}, Options{})
+	handler := New(nil, nil, nil, discovery, nil, nil, &fakeAdvisor{}, nil, nil, Options{})
 
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
@@ -256,6 +256,84 @@ func TestDescribeVLLMModel(t *testing.T) {
 	}
 	if len(resp.Recommendations) == 0 {
 		t.Fatalf("expected recommendations")
+	}
+}
+
+func TestGetHuggingFaceModel(t *testing.T) {
+	t.Parallel()
+
+	discovery := &fakeDiscovery{
+		modelInfo: &vllm.ModelInsight{
+			HFModel: &vllm.HuggingFaceModel{ModelID: "foo/bar"},
+		},
+	}
+	handler := New(nil, nil, nil, discovery, nil, nil, nil, nil, nil, Options{})
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Params = []gin.Param{{Key: "id", Value: "foo/bar"}}
+	c.Request = httptest.NewRequest(http.MethodGet, "/huggingface/models/foo/bar", nil)
+
+	handler.GetHuggingFaceModel(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestGetVLLMArchitecture(t *testing.T) {
+	t.Parallel()
+
+	discovery := &fakeDiscovery{
+		archDetail: &vllm.ArchitectureDetail{
+			ModelArchitecture: vllm.ModelArchitecture{Name: "qwen", FilePath: "models/qwen.py"},
+			Source:            "class Qwen: pass",
+		},
+	}
+	handler := New(nil, nil, nil, discovery, nil, nil, nil, nil, nil, Options{})
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Params = []gin.Param{{Key: "architecture", Value: "qwen"}}
+	c.Request = httptest.NewRequest(http.MethodGet, "/vllm/model/qwen", nil)
+
+	handler.GetVLLMArchitecture(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestSystemInfo(t *testing.T) {
+	t.Parallel()
+
+	wm := &fakeWeightStore{
+		statsResp: &weights.StorageStats{ModelCount: 1},
+	}
+	h := New(&catalog.Catalog{}, nil, wm, nil, nil, nil, &fakeAdvisor{}, nil, nil, Options{
+		Version:          "0.0.1",
+		CatalogRoot:      "/catalog",
+		CatalogModelsDir: "models",
+		WeightsPath:      "/mnt/models",
+		StatePath:        "/app/state",
+		AuthEnabled:      true,
+	})
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/system/info", nil)
+
+	h.SystemInfo(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", w.Code, w.Body.String())
+	}
+	var body map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("failed to unmarshal: %v", err)
+	}
+	if body["version"] != "0.0.1" {
+		t.Fatalf("expected version in response: %+v", body)
 	}
 }
 
@@ -292,9 +370,10 @@ func (f *fakeWeightStore) InstallFromHuggingFace(ctx context.Context, opts weigh
 }
 
 type fakeDiscovery struct {
-	hfModel   *vllm.HuggingFaceModel
-	modelResp *catalog.Model
-	modelInfo *vllm.ModelInsight
+	hfModel    *vllm.HuggingFaceModel
+	modelResp  *catalog.Model
+	modelInfo  *vllm.ModelInsight
+	archDetail *vllm.ArchitectureDetail
 }
 
 func (f *fakeDiscovery) ListSupportedArchitectures() ([]vllm.ModelArchitecture, error) {
@@ -332,6 +411,22 @@ func (f *fakeDiscovery) DescribeModel(id string, auto bool) (*vllm.ModelInsight,
 	}
 	info := *f.modelInfo
 	return &info, nil
+}
+
+func (f *fakeDiscovery) SearchModels(query string, limit int) ([]*vllm.ModelInsight, error) {
+	if f.modelInfo == nil {
+		return []*vllm.ModelInsight{}, nil
+	}
+	info := *f.modelInfo
+	return []*vllm.ModelInsight{&info}, nil
+}
+
+func (f *fakeDiscovery) GetArchitectureDetail(name string) (*vllm.ArchitectureDetail, error) {
+	if f.archDetail == nil {
+		return nil, fmt.Errorf("not found")
+	}
+	detail := *f.archDetail
+	return &detail, nil
 }
 
 type fakeCatalogWriter struct {

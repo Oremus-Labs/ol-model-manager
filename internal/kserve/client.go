@@ -279,6 +279,12 @@ func buildInferenceService(namespace, name string, model *catalog.Model, inferen
 	return isvc
 }
 
+// RenderManifest returns the raw InferenceService manifest without applying it.
+func (c *Client) RenderManifest(model *catalog.Model) map[string]interface{} {
+	isvc := buildInferenceService(c.namespace, c.isvcName, model, c.inferenceModelRoot)
+	return deepCopyMap(isvc.Object)
+}
+
 func buildVLLMArgs(vllm *catalog.VLLMConfig) []string {
 	if vllm == nil {
 		return nil

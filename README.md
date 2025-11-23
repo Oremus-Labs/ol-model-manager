@@ -7,13 +7,14 @@ HTTP API service for dynamically managing KServe InferenceServices based on mode
 - List available models from git-synced catalog with automatic refresh caching
 - Activate and deactivate KServe InferenceServices for catalog entries
 - Inspect and manage cached HuggingFace weights on the Venus PVC
-- Install new model weights directly from HuggingFace (with optional auth token)
-- Generate draft catalog entries from HuggingFace metadata via vLLM discovery helpers
+- Install new model weights directly from HuggingFace (with optional auth token) with async job tracking
+- Generate draft catalog entries from HuggingFace metadata via vLLM discovery helpers and manifest previews
+- Search the Hugging Face Hub for vLLM-compatible models and inspect metadata before installing
 - Query PVC usage statistics and supported vLLM architectures
+- Persist deployment history + job status via an embedded BoltDB store (backed by a PVC)
 - Validate catalog entries against the shared schema, PVC/secret availability, and GPU capacity
 - Dry-run KServe activations (and optional readiness probes) before flipping production traffic
-- Estimate GPU compatibility + runtime recommendations per catalog entry
-- Inspect Hugging Face metadata (downloads, tags, compatibility) before installing a model
+- Estimate GPU compatibility + runtime recommendations per catalog entry, with GPU profile metadata exposed to the UI
 
 ## Environment Variables
 
@@ -27,6 +28,7 @@ HTTP API service for dynamically managing KServe InferenceServices based on mode
 - `WEIGHTS_PVC_NAME` - Name of the PVC backing the cache (default: `venus-model-storage`)
 - `INFERENCE_MODEL_ROOT` - Path where KServe mounts the PVC inside runtime containers (default: `/mnt/models`)
 - `GPU_PROFILE_PATH` - Optional JSON file describing cluster GPU profiles (default: `/app/config/gpu-profiles.json`)
+- `STATE_PATH` - Directory where the BoltDB state file (jobs/history) is stored (default: `/app/state`)
 - `HUGGINGFACE_API_TOKEN` - Optional token for private HuggingFace models
 - `GITHUB_TOKEN` - Optional token for calling the GitHub API when scraping vLLM metadata
 - `CATALOG_REPO` - GitHub repo slug (`owner/repo`) for PR automation (enables `/catalog/pr`)
@@ -37,9 +39,11 @@ HTTP API service for dynamically managing KServe InferenceServices based on mode
 ## API Endpoints
 
 - `GET /healthz` - Health check
+- `GET /system/info` - Service metadata (version, catalog counts, PVC paths, GPU profiles, recent jobs/history)
 - `GET /metrics` - Prometheus metrics (request counts, durations, PVC usage)
 - `GET /models` - List available models (cached)
 - `GET /models/{id}` - Get details for a specific model
+- `GET /models/{id}/manifest` - Render the KServe manifest for an existing catalog entry
 - `GET /models/{id}/compatibility` - Estimate if the catalog entry fits on a GPU type (or all known GPUs)
 - `POST /models/activate` - Activate a model (body: `{"id": "model-id"}`)
 - `POST /models/deactivate` - Deactivate the active model
@@ -47,24 +51,31 @@ HTTP API service for dynamically managing KServe InferenceServices based on mode
 - `GET /active` - Get information about the currently active model
 - `POST /refresh` - Manually force catalog reload
 - `POST /catalog/generate` - Generate a catalog JSON stub (wrapper around discovery helpers)
+- `POST /catalog/preview` - Validate an ad-hoc catalog model and render its manifest
 - `POST /catalog/validate` - Validate a catalog entry against schema + cluster resources
 - `POST /catalog/pr` - Save a catalog entry, commit it, and open a GitHub pull request
 - `POST /vllm/model-info` - Describe a Hugging Face model (metadata, compatibility, suggested catalog entry)
+- `GET /huggingface/search` - Proxy Hugging Face search for vLLM-friendly results
+- `GET /huggingface/models/{id}` - Fetch Hugging Face metadata + compatibility info (GET variant of `/vllm/model-info`)
 - `GET /recommendations/{gpuType}` - Suggested vLLM flags/notes for the GPU profile
+- `GET /recommendations/profiles` - List known GPU profiles (useful for UI dropdowns)
 - `GET /weights` - List all installed weight directories
 - `GET /weights/usage` - PVC usage statistics
 - `GET /weights/{name}/info` - Inspect a specific weight directory
 - `DELETE /weights/{name}` - Delete cached weights
 - `POST /weights/install` - Install weights from HuggingFace (body includes `hfModelId`, optional `revision`, `files`, etc.)
-  - Response includes the `storageUri` (`pvc://...`) and `inferenceModelPath` you can paste directly into the catalog entry (`MODEL_ID` env) so the runtime loads the cached copy.
+  - Response includes the `storageUri` (`pvc://...`) and `inferenceModelPath` you can paste directly into the catalog entry (`MODEL_ID` env) so the runtime loads the cached copy. When async mode is enabled the endpoint returns `202 Accepted` plus a `job` object you can poll below.
+- `GET /jobs` / `GET /jobs/{id}` - Inspect asynchronous work (weight installs, etc.)
+- `GET /history` - Fetch recent install/activation/deletion events for UI timelines
 - `GET /vllm/supported-models` - List vLLM-supported architectures scraped from GitHub
+- `GET /vllm/model/{architecture}` - Fetch source/template metadata for a single vLLM runtime class
 - `POST /vllm/discover` - Generate a catalog config for a HuggingFace model
 
 ## Building
 
 ```bash
-docker build -t ghcr.io/oremus-labs/ol-model-manager:0.4.3-go .
-docker push ghcr.io/oremus-labs/ol-model-manager:0.4.3-go
+docker build -t ghcr.io/oremus-labs/ol-model-manager:0.4.4-go .
+docker push ghcr.io/oremus-labs/ol-model-manager:0.4.4-go
 ```
 
 ## Running Locally

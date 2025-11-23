@@ -7,6 +7,7 @@ toolchain go1.24.3
 require (
 	github.com/gin-gonic/gin v1.10.0
 	github.com/google/uuid v1.6.0
+	go.etcd.io/bbolt v1.3.9
 	github.com/prometheus/client_golang v1.19.0
 	github.com/xeipuuv/gojsonschema v1.2.0
 	k8s.io/api v0.31.1

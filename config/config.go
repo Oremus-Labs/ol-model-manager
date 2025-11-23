@@ -33,6 +33,7 @@ type Config struct {
 	// Inference runtime expectations
 	InferenceModelRoot string
 	GPUProfilesPath    string
+	StatePath          string
 
 	// External tokens
 	HuggingFaceToken string
@@ -61,6 +62,7 @@ func Load() *Config {
 		WeightsPVCName:         getEnv("WEIGHTS_PVC_NAME", "venus-model-storage"),
 		InferenceModelRoot:     getEnv("INFERENCE_MODEL_ROOT", "/mnt/models"),
 		GPUProfilesPath:        getEnv("GPU_PROFILE_PATH", "/app/config/gpu-profiles.json"),
+		StatePath:              getEnv("STATE_PATH", "/app/state"),
 		HuggingFaceToken:       os.Getenv("HUGGINGFACE_API_TOKEN"),
 		GitHubToken:            os.Getenv("GITHUB_TOKEN"),
 		GitAuthorName:          getEnv("GIT_AUTHOR_NAME", ""),
