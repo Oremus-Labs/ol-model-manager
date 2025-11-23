@@ -123,7 +123,7 @@ class KServeClient:
             "modelFormat": {
                 "name": "custom"
             },
-            "runtime": model_config.get("runtime", "qwen-vllm-runtime")
+            "runtime": model_config.get("runtime", "vllm-runtime")
         }
 
         if storage_uri:
