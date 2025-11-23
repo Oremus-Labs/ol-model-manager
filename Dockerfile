@@ -26,9 +26,11 @@ FROM alpine:latest
 RUN apk --no-cache add ca-certificates
 
 WORKDIR /app
+RUN mkdir -p /app/config
 
 # Copy the binary from builder
 COPY --from=builder /build/model-manager .
+COPY config/gpu-profiles.json /app/config/gpu-profiles.json
 
 # Create non-root user
 RUN adduser -D -u 1000 appuser && chown -R appuser:appuser /app

@@ -26,6 +26,7 @@ HTTP API service for dynamically managing KServe InferenceServices based on mode
 - `WEIGHTS_INSTALL_TIMEOUT` - Timeout for weight installation operations (default: `30m`)
 - `WEIGHTS_PVC_NAME` - Name of the PVC backing the cache (default: `venus-model-storage`)
 - `INFERENCE_MODEL_ROOT` - Path where KServe mounts the PVC inside runtime containers (default: `/mnt/models`)
+- `GPU_PROFILE_PATH` - Optional JSON file describing cluster GPU profiles (default: `/app/config/gpu-profiles.json`)
 - `HUGGINGFACE_API_TOKEN` - Optional token for private HuggingFace models
 - `GITHUB_TOKEN` - Optional token for calling the GitHub API when scraping vLLM metadata
 - `CATALOG_REPO` - GitHub repo slug (`owner/repo`) for PR automation (enables `/catalog/pr`)
@@ -62,8 +63,8 @@ HTTP API service for dynamically managing KServe InferenceServices based on mode
 ## Building
 
 ```bash
-docker build -t ghcr.io/oremus-labs/ol-model-manager:0.4.2-go .
-docker push ghcr.io/oremus-labs/ol-model-manager:0.4.2-go
+docker build -t ghcr.io/oremus-labs/ol-model-manager:0.4.3-go .
+docker push ghcr.io/oremus-labs/ol-model-manager:0.4.3-go
 ```
 
 ## Running Locally

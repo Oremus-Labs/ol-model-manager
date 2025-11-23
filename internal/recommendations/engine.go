@@ -16,15 +16,19 @@ import (
 
 // GPUProfile describes a GPU class available for inference.
 type GPUProfile struct {
-	Name     string   `json:"name"`
-	MemoryGB int      `json:"memoryGB"`
-	Vendor   string   `json:"vendor,omitempty"`
-	Features []string `json:"features,omitempty"`
+	Name        string            `json:"name"`
+	Description string            `json:"description,omitempty"`
+	MemoryGB    int               `json:"memoryGB"`
+	Vendor      string            `json:"vendor,omitempty"`
+	DeviceID    string            `json:"deviceId,omitempty"`
+	Features    []string          `json:"features,omitempty"`
+	Labels      map[string]string `json:"labels,omitempty"`
 }
 
 // Engine produces compatibility reports and runtime recommendations.
 type Engine struct {
 	profiles map[string]GPUProfile
+	ordered  []GPUProfile
 }
 
 // CompatibilityReport summarizes whether a model fits on a GPU.
@@ -47,9 +51,10 @@ type Candidate struct {
 
 // Recommendation captures runtime hints for a GPU.
 type Recommendation struct {
-	GPUType string   `json:"gpuType"`
-	Flags   []string `json:"flags"`
-	Notes   []string `json:"notes"`
+	GPUType  string   `json:"gpuType"`
+	MemoryGB int      `json:"memoryGB,omitempty"`
+	Flags    []string `json:"flags"`
+	Notes    []string `json:"notes"`
 }
 
 // LoadProfiles loads GPU profiles from a JSON file.
@@ -75,10 +80,15 @@ func LoadProfiles(path string) (map[string]GPUProfile, error) {
 // New constructs an Engine from GPU profiles.
 func New(profiles map[string]GPUProfile) *Engine {
 	copies := make(map[string]GPUProfile, len(profiles))
+	ordered := make([]GPUProfile, 0, len(profiles))
 	for k, v := range profiles {
 		copies[k] = v
+		ordered = append(ordered, v)
 	}
-	return &Engine{profiles: copies}
+	sort.Slice(ordered, func(i, j int) bool {
+		return strings.ToLower(ordered[i].Name) < strings.ToLower(ordered[j].Name)
+	})
+	return &Engine{profiles: copies, ordered: ordered}
 }
 
 // Compatibility evaluates whether the model can fit on the provided GPU type.
@@ -111,13 +121,7 @@ func (e *Engine) Compatibility(model *catalog.Model, gpuType string) Compatibili
 		return report
 	}
 
-	keys := make([]string, 0, len(e.profiles))
-	for name := range e.profiles {
-		keys = append(keys, name)
-	}
-	sort.Strings(keys)
-	for _, key := range keys {
-		profile := e.profiles[key]
+	for _, profile := range e.ordered {
 		candidate := Candidate{
 			GPU:        profile.Name,
 			Compatible: profile.MemoryGB >= required,
@@ -137,28 +141,72 @@ func (e *Engine) Compatibility(model *catalog.Model, gpuType string) Compatibili
 
 // Recommend returns runtime flag suggestions for the GPU.
 func (e *Engine) Recommend(gpuType string) Recommendation {
+	return e.RecommendForModel(nil, gpuType)
+}
+
+// RecommendForModel tailors flags to a GPU + catalog model.
+func (e *Engine) RecommendForModel(model *catalog.Model, gpuType string) Recommendation {
 	profile, ok := e.profiles[strings.ToLower(gpuType)]
 	if !ok {
 		return Recommendation{GPUType: gpuType, Notes: []string{"unknown gpu type"}}
 	}
 
-	rec := Recommendation{GPUType: profile.Name}
-	if profile.MemoryGB <= 24 {
-		rec.Flags = append(rec.Flags, "--dtype", "float16")
-		rec.Notes = append(rec.Notes, "Prefer 4-bit/8-bit weights for models >=7B")
-	} else {
-		rec.Flags = append(rec.Flags, "--dtype", "bfloat16")
+	rec := Recommendation{
+		GPUType:  profile.Name,
+		MemoryGB: profile.MemoryGB,
 	}
 
-	if profile.MemoryGB <= 16 {
-		rec.Notes = append(rec.Notes, "Enable tensor parallel when running multi-billion parameter models")
+	var required int
+	if model != nil {
+		required, _ = estimateModelVRAM(model)
+	} else {
+		required = 16
+	}
+	margin := profile.MemoryGB - required
+
+	if hasFeature(profile, "bf16") && profile.MemoryGB >= 32 {
+		rec.Flags = append(rec.Flags, "--dtype", "bfloat16")
+	} else if hasFeature(profile, "fp16") {
+		rec.Flags = append(rec.Flags, "--dtype", "float16")
+	}
+
+	if profile.MemoryGB >= 80 {
+		rec.Notes = append(rec.Notes, "Enough VRAM for most 70B models without quantization")
+	} else if profile.MemoryGB <= 32 {
+		rec.Notes = append(rec.Notes, "Plan for 4-bit/8-bit quantization on >7B models")
+		rec.Flags = append(rec.Flags, "--tensor-parallel-size", "2")
+	}
+
+	if model != nil {
+		switch {
+		case margin >= 32:
+			rec.Notes = append(rec.Notes, fmt.Sprintf("~%d GiB headroom for %s", margin, model.ID))
+		case margin >= 8:
+			rec.Notes = append(rec.Notes, fmt.Sprintf("fits %s with modest headroom (~%d GiB)", model.ID, margin))
+		case margin >= 0:
+			rec.Notes = append(rec.Notes, fmt.Sprintf("VRAM margin for %s is tight (~%d GiB)", model.ID, margin))
+		default:
+			rec.Notes = append(rec.Notes, fmt.Sprintf("requires quantization or swap space (%d GiB short)", -margin))
+			rec.Flags = append(rec.Flags, "--swap-space", "4")
+		}
 	}
 
 	if strings.Contains(strings.ToLower(profile.Vendor), "amd") {
-		rec.Notes = append(rec.Notes, "Set HIP_VISIBLE_DEVICES and ensure ROCm-specific env vars are present")
+		rec.Notes = append(rec.Notes, "Ensure HIP_VISIBLE_DEVICES / ROCm env vars are set")
+	}
+
+	if hasFeature(profile, "pcie-gen4") {
+		rec.Notes = append(rec.Notes, "Use --max-num-batched-tokens to stay within PCIe limits")
 	}
 
 	return rec
+}
+
+// Profiles returns the known GPU profiles in deterministic order.
+func (e *Engine) Profiles() []GPUProfile {
+	out := make([]GPUProfile, len(e.ordered))
+	copy(out, e.ordered)
+	return out
 }
 
 var sizePattern = regexp.MustCompile(`(?i)(\d+(?:\.\d+)?)\s*(b|m)`)
@@ -203,4 +251,14 @@ func buildSuggestions(profile GPUProfile) []string {
 		notes = append(notes, "Enable tensor parallel for fastest throughput")
 	}
 	return notes
+}
+
+func hasFeature(profile GPUProfile, feature string) bool {
+	target := strings.ToLower(feature)
+	for _, f := range profile.Features {
+		if strings.ToLower(f) == target {
+			return true
+		}
+	}
+	return false
 }

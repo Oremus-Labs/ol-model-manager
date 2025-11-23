@@ -1,0 +1,19 @@
+[
+  {
+    "name": "amd-mi210-venus",
+    "description": "AMD Instinct MI210 96GB (Venus node)",
+    "vendor": "amd",
+    "memoryGB": 96,
+    "deviceId": "1002:1586",
+    "features": [
+      "bf16",
+      "fp16",
+      "hip",
+      "pcie-gen4"
+    ],
+    "labels": {
+      "kubernetes.io/hostname": "venus",
+      "dedicated": "ai"
+    }
+  }
+]

@@ -13,6 +13,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/oremus-labs/ol-model-manager/internal/catalog"
 	"github.com/oremus-labs/ol-model-manager/internal/catalogwriter"
+	"github.com/oremus-labs/ol-model-manager/internal/recommendations"
 	"github.com/oremus-labs/ol-model-manager/internal/vllm"
 	"github.com/oremus-labs/ol-model-manager/internal/weights"
 )
@@ -223,10 +224,11 @@ func TestDescribeVLLMModel(t *testing.T) {
 		modelInfo: &vllm.ModelInsight{
 			Compatible: true,
 			MatchedArchitectures: []string{"qwen"},
+			SuggestedCatalog: &catalog.Model{ID: "foo"},
 		},
 	}
 
-	handler := New(nil, nil, nil, discovery, nil, nil, nil, Options{})
+	handler := New(nil, nil, nil, discovery, nil, nil, &fakeAdvisor{}, Options{})
 
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
@@ -239,13 +241,21 @@ func TestDescribeVLLMModel(t *testing.T) {
 		t.Fatalf("expected 200 got %d body=%s", w.Code, w.Body.String())
 	}
 
-	var resp map[string]interface{}
+	var resp struct {
+		Insight struct {
+			Compatible bool `json:"compatible"`
+		} `json:"insight"`
+		Recommendations []recommendations.Recommendation `json:"recommendations"`
+	}
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("failed to unmarshal response: %v", err)
 	}
 
-	if resp["compatible"] != true {
-		t.Fatalf("expected compatible flag: %v", resp["compatible"])
+	if !resp.Insight.Compatible {
+		t.Fatalf("expected compatible flag")
+	}
+	if len(resp.Recommendations) == 0 {
+		t.Fatalf("expected recommendations")
 	}
 }
 
@@ -350,4 +360,29 @@ func (f *fakeCatalogWriter) CommitAndPush(ctx context.Context, branch, base, mes
 
 func (f *fakeCatalogWriter) CreatePullRequest(ctx context.Context, opts catalogwriter.PullRequestOptions) (*catalogwriter.PullRequest, error) {
 	return f.pr, f.prErr
+}
+
+type fakeAdvisor struct{}
+
+func (f *fakeAdvisor) Compatibility(model *catalog.Model, gpuType string) recommendations.CompatibilityReport {
+	return recommendations.CompatibilityReport{
+		ModelID:         model.ID,
+		GPUType:         gpuType,
+		EstimatedVRAMGB: 12,
+		Compatible:      true,
+	}
+}
+
+func (f *fakeAdvisor) Recommend(gpuType string) recommendations.Recommendation {
+	return recommendations.Recommendation{GPUType: gpuType}
+}
+
+func (f *fakeAdvisor) RecommendForModel(model *catalog.Model, gpuType string) recommendations.Recommendation {
+	return recommendations.Recommendation{GPUType: gpuType}
+}
+
+func (f *fakeAdvisor) Profiles() []recommendations.GPUProfile {
+	return []recommendations.GPUProfile{
+		{Name: "test-gpu", MemoryGB: 32},
+	}
 }

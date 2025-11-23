@@ -60,7 +60,7 @@ func Load() *Config {
 		WeightsInstallTimeout:  getEnvDuration("WEIGHTS_INSTALL_TIMEOUT", 30*time.Minute),
 		WeightsPVCName:         getEnv("WEIGHTS_PVC_NAME", "venus-model-storage"),
 		InferenceModelRoot:     getEnv("INFERENCE_MODEL_ROOT", "/mnt/models"),
-		GPUProfilesPath:        getEnv("GPU_PROFILE_PATH", ""),
+		GPUProfilesPath:        getEnv("GPU_PROFILE_PATH", "/app/config/gpu-profiles.json"),
 		HuggingFaceToken:       os.Getenv("HUGGINGFACE_API_TOKEN"),
 		GitHubToken:            os.Getenv("GITHUB_TOKEN"),
 		GitAuthorName:          getEnv("GIT_AUTHOR_NAME", ""),

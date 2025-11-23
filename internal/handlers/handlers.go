@@ -62,6 +62,8 @@ type catalogWriter interface {
 type recommendationService interface {
 	Compatibility(*catalog.Model, string) recommendations.CompatibilityReport
 	Recommend(string) recommendations.Recommendation
+	RecommendForModel(*catalog.Model, string) recommendations.Recommendation
+	Profiles() []recommendations.GPUProfile
 }
 
 // Handler encapsulates dependencies for HTTP handlers.
@@ -550,7 +552,20 @@ func (h *Handler) DescribeVLLMModel(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, info)
+	response := gin.H{"insight": info}
+
+	if h.advisor != nil && info.SuggestedCatalog != nil {
+		var recs []recommendations.Recommendation
+		var compat []recommendations.CompatibilityReport
+		for _, profile := range h.advisor.Profiles() {
+			recs = append(recs, h.advisor.RecommendForModel(info.SuggestedCatalog, profile.Name))
+			compat = append(compat, h.advisor.Compatibility(info.SuggestedCatalog, profile.Name))
+		}
+		response["recommendations"] = recs
+		response["compatibility"] = compat
+	}
+
+	c.JSON(http.StatusOK, response)
 }
 
 // GenerateCatalogEntry produces a draft catalog model with optional overrides.
