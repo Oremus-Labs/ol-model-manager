@@ -3,6 +3,7 @@ package kserve
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"path/filepath"
@@ -190,11 +191,15 @@ func buildInferenceService(namespace, name string, model *catalog.Model, inferen
 
 	envVars := prepareEnvVars(model.Env, model.StorageURI, inferenceModelRoot)
 	if envVars != nil {
-		modelSpec["env"] = envVars
+		if converted := jsonCompatible(envVars); converted != nil {
+			modelSpec["env"] = converted
+		}
 	}
 
 	if model.Storage != nil {
-		modelSpec["storage"] = model.Storage
+		if converted := jsonCompatible(model.Storage); converted != nil {
+			modelSpec["storage"] = converted
+		}
 	}
 
 	// Add vLLM args if configured
@@ -232,12 +237,16 @@ func buildInferenceService(namespace, name string, model *catalog.Model, inferen
 	}
 
 	if model.Tolerations != nil {
-		predictor["tolerations"] = model.Tolerations
+		if converted := jsonCompatible(model.Tolerations); converted != nil {
+			predictor["tolerations"] = converted
+		}
 	}
 
 	if model.Resources != nil {
-		modelSpec["resources"] = model.Resources
-		predictor["resources"] = model.Resources
+		if converted := jsonCompatible(model.Resources); converted != nil {
+			modelSpec["resources"] = converted
+			predictor["resources"] = converted
+		}
 	}
 
 	if pvcStorage {
@@ -246,11 +255,15 @@ func buildInferenceService(namespace, name string, model *catalog.Model, inferen
 	}
 
 	if model.VolumeMounts != nil {
-		modelSpec["volumeMounts"] = model.VolumeMounts
+		if converted := jsonCompatible(model.VolumeMounts); converted != nil {
+			modelSpec["volumeMounts"] = converted
+		}
 	}
 
 	if model.Volumes != nil {
-		predictor["volumes"] = model.Volumes
+		if converted := jsonCompatible(model.Volumes); converted != nil {
+			predictor["volumes"] = converted
+		}
 	}
 
 	return isvc
@@ -379,6 +392,23 @@ func deepCopySlice(src []interface{}) []interface{} {
 		default:
 			out[i] = val
 		}
+	}
+	return out
+}
+
+func jsonCompatible(value interface{}) interface{} {
+	if value == nil {
+		return nil
+	}
+	data, err := json.Marshal(value)
+	if err != nil {
+		log.Printf("Failed to marshal object: %v", err)
+		return nil
+	}
+	var out interface{}
+	if err := json.Unmarshal(data, &out); err != nil {
+		log.Printf("Failed to unmarshal object: %v", err)
+		return nil
 	}
 	return out
 }

@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"path"
+	"reflect"
 	"regexp"
 	"sync"
 	"time"
@@ -87,6 +88,10 @@ func New(cat *catalog.Catalog, ks *kserve.Client, wm weightStore, vdisc discover
 	}
 	if opts.InferenceModelRoot == "" {
 		opts.InferenceModelRoot = "/mnt/models"
+	}
+
+	if advisor != nil && isNilInterface(advisor) {
+		advisor = nil
 	}
 
 	return &Handler{
@@ -782,6 +787,16 @@ func modelDisplayName(model *catalog.Model) string {
 		return model.DisplayName
 	}
 	return model.ID
+}
+
+func isNilInterface(value interface{}) bool {
+	val := reflect.ValueOf(value)
+	switch val.Kind() {
+	case reflect.Ptr, reflect.Interface, reflect.Func, reflect.Map, reflect.Slice, reflect.Chan:
+		return val.IsNil()
+	default:
+		return false
+	}
 }
 
 var hfModelIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$`)
