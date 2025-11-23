@@ -15,11 +15,13 @@ import (
 	"github.com/oremus-labs/ol-model-manager/internal/catalog"
 	"github.com/oremus-labs/ol-model-manager/internal/handlers"
 	"github.com/oremus-labs/ol-model-manager/internal/kserve"
+	"github.com/oremus-labs/ol-model-manager/internal/vllm"
+	"github.com/oremus-labs/ol-model-manager/internal/weights"
 )
 
 const (
-	version          = "0.2.1-go"
-	shutdownTimeout  = 5 * time.Second
+	version         = "0.3.0-go"
+	shutdownTimeout = 5 * time.Second
 )
 
 func main() {
@@ -45,8 +47,21 @@ func main() {
 		log.Fatalf("Failed to initialize KServe client: %v", err)
 	}
 
+	// Initialize weights/vLLM services
+	weightManager := weights.New(cfg.WeightsStoragePath)
+	vllmDiscovery := vllm.New(
+		vllm.WithGitHubToken(cfg.GitHubToken),
+		vllm.WithHuggingFaceToken(cfg.HuggingFaceToken),
+	)
+
 	// Initialize handlers
-	h := handlers.New(cat, ksClient)
+	h := handlers.New(cat, ksClient, weightManager, vllmDiscovery, handlers.Options{
+		CatalogTTL:            cfg.CatalogRefreshInterval,
+		WeightsInstallTimeout: cfg.WeightsInstallTimeout,
+		HuggingFaceToken:      cfg.HuggingFaceToken,
+		WeightsPVCName:        cfg.WeightsPVCName,
+		InferenceModelRoot:    cfg.InferenceModelRoot,
+	})
 
 	// Setup HTTP server
 	router := setupRouter(h)
@@ -101,6 +116,17 @@ func setupRouter(h *handlers.Handler) *gin.Engine {
 	router.POST("/models/deactivate", h.DeactivateModel)
 	router.GET("/active", h.GetActiveModel)
 	router.POST("/refresh", h.RefreshCatalog)
+
+	// Weight endpoints
+	router.GET("/weights", h.ListWeights)
+	router.GET("/weights/usage", h.GetWeightUsage)
+	router.GET("/weights/:name/info", h.GetWeightInfo)
+	router.DELETE("/weights/:name", h.DeleteWeights)
+	router.POST("/weights/install", h.InstallWeights)
+
+	// vLLM discovery endpoints
+	router.GET("/vllm/supported-models", h.ListVLLMArchitectures)
+	router.POST("/vllm/discover", h.DiscoverModel)
 
 	return router
 }

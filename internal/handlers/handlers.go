@@ -2,30 +2,88 @@
 package handlers
 
 import (
+	"context"
+	"fmt"
 	"log"
 	"net/http"
+	"path"
+	"sync"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/oremus-labs/ol-model-manager/internal/catalog"
 	"github.com/oremus-labs/ol-model-manager/internal/kserve"
+	"github.com/oremus-labs/ol-model-manager/internal/vllm"
+	"github.com/oremus-labs/ol-model-manager/internal/weights"
 )
+
+// Options configures handler runtime behavior.
+type Options struct {
+	CatalogTTL            time.Duration
+	WeightsInstallTimeout time.Duration
+	HuggingFaceToken      string
+	WeightsPVCName        string
+	InferenceModelRoot    string
+}
+
+type weightStore interface {
+	List() ([]weights.WeightInfo, error)
+	Get(string) (*weights.WeightInfo, error)
+	Delete(string) error
+	GetStats() (*weights.StorageStats, error)
+	InstallFromHuggingFace(context.Context, weights.InstallOptions) (*weights.WeightInfo, error)
+}
+
+type discoveryService interface {
+	ListSupportedArchitectures() ([]vllm.ModelArchitecture, error)
+	GenerateModelConfig(vllm.GenerateRequest) (*catalog.Model, error)
+	GetHuggingFaceModel(string) (*vllm.HuggingFaceModel, error)
+}
 
 // Handler encapsulates dependencies for HTTP handlers.
 type Handler struct {
 	catalog *catalog.Catalog
 	kserve  *kserve.Client
+	weights weightStore
+	vllm    discoveryService
+	opts    Options
+
+	catalogMu          sync.Mutex
+	lastCatalogRefresh time.Time
 }
 
 // New creates a new Handler instance.
-func New(cat *catalog.Catalog, ks *kserve.Client) *Handler {
+func New(cat *catalog.Catalog, ks *kserve.Client, wm weightStore, vdisc discoveryService, opts Options) *Handler {
+	if opts.CatalogTTL <= 0 {
+		opts.CatalogTTL = time.Minute
+	}
+	if opts.WeightsInstallTimeout <= 0 {
+		opts.WeightsInstallTimeout = 30 * time.Minute
+	}
+	if opts.InferenceModelRoot == "" {
+		opts.InferenceModelRoot = "/mnt/models"
+	}
+
 	return &Handler{
-		catalog: cat,
-		kserve:  ks,
+		catalog:            cat,
+		kserve:             ks,
+		weights:            wm,
+		vllm:               vdisc,
+		opts:               opts,
+		lastCatalogRefresh: time.Now(),
 	}
 }
 
 type activateRequest struct {
 	ID string `json:"id" binding:"required"`
+}
+
+type installWeightsRequest struct {
+	HFModelID string   `json:"hfModelId" binding:"required"`
+	Revision  string   `json:"revision,omitempty"`
+	Target    string   `json:"target,omitempty"`
+	Files     []string `json:"files,omitempty"`
+	Overwrite bool     `json:"overwrite"`
 }
 
 // Health returns the health status of the service.
@@ -35,11 +93,9 @@ func (h *Handler) Health(c *gin.Context) {
 
 // ListModels returns all available models.
 func (h *Handler) ListModels(c *gin.Context) {
-	if err := h.catalog.Reload(); err != nil {
-		log.Printf("Failed to reload catalog: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": "Failed to reload model catalog",
-		})
+	if err := h.ensureCatalogFresh(false); err != nil {
+		log.Printf("Failed to ensure catalog freshness: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load model catalog"})
 		return
 	}
 
@@ -48,21 +104,16 @@ func (h *Handler) ListModels(c *gin.Context) {
 
 // GetModel returns details for a specific model.
 func (h *Handler) GetModel(c *gin.Context) {
-	modelID := c.Param("id")
-
-	if err := h.catalog.Reload(); err != nil {
-		log.Printf("Failed to reload catalog: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": "Failed to reload model catalog",
-		})
+	if err := h.ensureCatalogFresh(false); err != nil {
+		log.Printf("Failed to ensure catalog freshness: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load model catalog"})
 		return
 	}
 
+	modelID := c.Param("id")
 	model := h.catalog.Get(modelID)
 	if model == nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"error": "Model not found",
-		})
+		c.JSON(http.StatusNotFound, gin.H{"error": "model not found"})
 		return
 	}
 
@@ -73,38 +124,28 @@ func (h *Handler) GetModel(c *gin.Context) {
 func (h *Handler) ActivateModel(c *gin.Context) {
 	var req activateRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error": err.Error(),
-		})
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
 	log.Printf("Activating model: %s", req.ID)
 
-	// Reload catalog and get model
-	if err := h.catalog.Reload(); err != nil {
+	if err := h.ensureCatalogFresh(true); err != nil {
 		log.Printf("Failed to reload catalog: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": "Failed to reload model catalog",
-		})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to reload model catalog"})
 		return
 	}
 
 	model := h.catalog.Get(req.ID)
 	if model == nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"error": "Model not found",
-		})
+		c.JSON(http.StatusNotFound, gin.H{"error": "model not found"})
 		return
 	}
 
-	// Activate the model
 	result, err := h.kserve.Activate(model)
 	if err != nil {
 		log.Printf("Failed to activate model %s: %v", req.ID, err)
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": err.Error(),
-		})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
@@ -124,9 +165,7 @@ func (h *Handler) DeactivateModel(c *gin.Context) {
 	result, err := h.kserve.Deactivate()
 	if err != nil {
 		log.Printf("Failed to deactivate model: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": err.Error(),
-		})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
@@ -143,9 +182,7 @@ func (h *Handler) GetActiveModel(c *gin.Context) {
 	isvc, err := h.kserve.GetActive()
 	if err != nil {
 		log.Printf("Failed to get active model: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": err.Error(),
-		})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
@@ -167,11 +204,9 @@ func (h *Handler) GetActiveModel(c *gin.Context) {
 func (h *Handler) RefreshCatalog(c *gin.Context) {
 	log.Println("Manually refreshing model catalog")
 
-	if err := h.catalog.Reload(); err != nil {
+	if err := h.ensureCatalogFresh(true); err != nil {
 		log.Printf("Failed to refresh catalog: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": "Failed to refresh model catalog",
-		})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to refresh model catalog"})
 		return
 	}
 
@@ -180,4 +215,216 @@ func (h *Handler) RefreshCatalog(c *gin.Context) {
 		"message": "Catalog refreshed",
 		"models":  h.catalog.List(),
 	})
+}
+
+// ListWeights returns cached weights stored on Venus.
+func (h *Handler) ListWeights(c *gin.Context) {
+	if h.weights == nil {
+		c.JSON(http.StatusNotImplemented, gin.H{"error": "weight management is disabled"})
+		return
+	}
+
+	weights, err := h.weights.List()
+	if err != nil {
+		log.Printf("Failed to list weights: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list weights"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"weights": weights})
+}
+
+// GetWeightInfo returns information about a specific weight directory.
+func (h *Handler) GetWeightInfo(c *gin.Context) {
+	if h.weights == nil {
+		c.JSON(http.StatusNotImplemented, gin.H{"error": "weight management is disabled"})
+		return
+	}
+
+	name := c.Param("name")
+	info, err := h.weights.Get(name)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, info)
+}
+
+// DeleteWeights removes cached weights for a model.
+func (h *Handler) DeleteWeights(c *gin.Context) {
+	if h.weights == nil {
+		c.JSON(http.StatusNotImplemented, gin.H{"error": "weight management is disabled"})
+		return
+	}
+
+	name := c.Param("name")
+	if err := h.weights.Delete(name); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"status":  "success",
+		"message": "Deleted weights for " + name,
+	})
+}
+
+// GetWeightUsage returns PVC usage statistics.
+func (h *Handler) GetWeightUsage(c *gin.Context) {
+	if h.weights == nil {
+		c.JSON(http.StatusNotImplemented, gin.H{"error": "weight management is disabled"})
+		return
+	}
+
+	stats, err := h.weights.GetStats()
+	if err != nil {
+		log.Printf("Failed to fetch storage stats: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch storage stats"})
+		return
+	}
+
+	c.JSON(http.StatusOK, stats)
+}
+
+// InstallWeights downloads HuggingFace model weights into the PVC.
+func (h *Handler) InstallWeights(c *gin.Context) {
+	if h.weights == nil || h.vllm == nil {
+		c.JSON(http.StatusNotImplemented, gin.H{"error": "weight installation is disabled"})
+		return
+	}
+
+	var req installWeightsRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	hfModel, err := h.vllm.GetHuggingFaceModel(req.HFModelID)
+	if err != nil {
+		log.Printf("Failed to inspect HuggingFace model %s: %v", req.HFModelID, err)
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	files := req.Files
+	if len(files) == 0 {
+		files = collectHuggingFaceFiles(hfModel)
+	}
+
+	if len(files) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "no downloadable files found for model"})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), h.opts.WeightsInstallTimeout)
+	defer cancel()
+
+	info, err := h.weights.InstallFromHuggingFace(ctx, weights.InstallOptions{
+		ModelID:   req.HFModelID,
+		Revision:  req.Revision,
+		Target:    req.Target,
+		Files:     files,
+		Token:     h.opts.HuggingFaceToken,
+		Overwrite: req.Overwrite,
+	})
+	if err != nil {
+		log.Printf("Failed to install weights for %s: %v", req.HFModelID, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	storageURI := ""
+	if h.opts.WeightsPVCName != "" {
+		storageURI = fmt.Sprintf("pvc://%s/%s", h.opts.WeightsPVCName, info.Name)
+	}
+	modelPath := path.Join(h.opts.InferenceModelRoot, info.Name)
+
+	response := gin.H{
+		"status":             "success",
+		"model":              req.HFModelID,
+		"weights":            info,
+		"inferenceModelPath": modelPath,
+	}
+	if storageURI != "" {
+		response["storageUri"] = storageURI
+		response["catalogInstructions"] = fmt.Sprintf("Set storageUri to %s and MODEL_ID (or equivalent env) to %s", storageURI, modelPath)
+	}
+
+	c.JSON(http.StatusOK, response)
+}
+
+// ListVLLMArchitectures lists vLLM supported architectures.
+func (h *Handler) ListVLLMArchitectures(c *gin.Context) {
+	if h.vllm == nil {
+		c.JSON(http.StatusNotImplemented, gin.H{"error": "vLLM discovery is disabled"})
+		return
+	}
+
+	architectures, err := h.vllm.ListSupportedArchitectures()
+	if err != nil {
+		log.Printf("Failed to list vLLM architectures: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list vLLM architectures"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"architectures": architectures})
+}
+
+// DiscoverModel generates a catalog entry for a HuggingFace model.
+func (h *Handler) DiscoverModel(c *gin.Context) {
+	if h.vllm == nil {
+		c.JSON(http.StatusNotImplemented, gin.H{"error": "vLLM discovery is disabled"})
+		return
+	}
+
+	var req vllm.GenerateRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	model, err := h.vllm.GenerateModelConfig(req)
+	if err != nil {
+		log.Printf("Failed to generate model config: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, model)
+}
+
+func (h *Handler) ensureCatalogFresh(force bool) error {
+	h.catalogMu.Lock()
+	defer h.catalogMu.Unlock()
+
+	if force || h.lastCatalogRefresh.IsZero() || time.Since(h.lastCatalogRefresh) > h.opts.CatalogTTL {
+		if err := h.catalog.Reload(); err != nil {
+			return err
+		}
+		h.lastCatalogRefresh = time.Now()
+	}
+	return nil
+}
+
+func collectHuggingFaceFiles(model *vllm.HuggingFaceModel) []string {
+	files := make([]string, 0, len(model.Siblings))
+	seen := make(map[string]struct{})
+
+	for _, sibling := range model.Siblings {
+		name := sibling.RFileName
+		if name == "" || name == "." {
+			continue
+		}
+		if name[len(name)-1] == '/' {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		files = append(files, name)
+	}
+
+	return files
 }
