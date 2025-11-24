@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -47,6 +48,15 @@ type Config struct {
 	GPUInventorySource     string
 	PVCAlertThreshold      float64
 
+	// Redis / events configuration
+	RedisAddr        string
+	RedisUsername    string
+	RedisPassword    string
+	RedisDB          int
+	RedisTLSEnabled  bool
+	RedisTLSInsecure bool
+	EventsChannel    string
+
 	// External tokens
 	HuggingFaceToken string
 	GitHubToken      string
@@ -68,6 +78,9 @@ func Load() *Config {
 			defaultFile = "model-manager.db"
 		}
 		dataStoreDSN = filepath.Join(statePath, defaultFile)
+	}
+	if dataStoreDriver == "postgres" && dataStoreDSN == "" {
+		dataStoreDSN = os.Getenv("POSTGRES_DSN")
 	}
 	return &Config{
 		ServerPort:             getEnv("SERVER_PORT", "8080"),
@@ -94,6 +107,13 @@ func Load() *Config {
 		RecommendationCacheTTL: getEnvDuration("RECOMMENDATION_CACHE_TTL", 15*time.Minute),
 		GPUInventorySource:     getEnv("GPU_INVENTORY_SOURCE", "k8s-nodes"),
 		PVCAlertThreshold:      getEnvFloat("PVC_ALERT_THRESHOLD", 0.85),
+		RedisAddr:              getEnv("REDIS_ADDR", ""),
+		RedisUsername:          getEnv("REDIS_USERNAME", ""),
+		RedisPassword:          os.Getenv("REDIS_PASSWORD"),
+		RedisDB:                getEnvInt("REDIS_DB", 0),
+		RedisTLSEnabled:        getEnvBool("REDIS_TLS_ENABLED", false),
+		RedisTLSInsecure:       getEnvBool("REDIS_TLS_INSECURE_SKIP_VERIFY", false),
+		EventsChannel:          getEnv("EVENTS_CHANNEL", "model-manager-events"),
 		HuggingFaceToken:       os.Getenv("HUGGINGFACE_API_TOKEN"),
 		GitHubToken:            os.Getenv("GITHUB_TOKEN"),
 		GitAuthorName:          getEnv("GIT_AUTHOR_NAME", ""),
@@ -126,6 +146,30 @@ func getEnvFloat(key string, defaultValue float64) float64 {
 			return f
 		}
 		log.Printf("Invalid float for %s: %s, using default %f", key, value, defaultValue)
+	}
+	return defaultValue
+}
+
+func getEnvInt(key string, defaultValue int) int {
+	if value := os.Getenv(key); value != "" {
+		if i, err := strconv.Atoi(value); err == nil {
+			return i
+		}
+		log.Printf("Invalid int for %s: %s, using default %d", key, value, defaultValue)
+	}
+	return defaultValue
+}
+
+func getEnvBool(key string, defaultValue bool) bool {
+	if value := os.Getenv(key); value != "" {
+		switch strings.ToLower(value) {
+		case "1", "true", "yes", "y":
+			return true
+		case "0", "false", "no", "n":
+			return false
+		default:
+			log.Printf("Invalid bool for %s: %s, using default %t", key, value, defaultValue)
+		}
 	}
 	return defaultValue
 }

@@ -27,13 +27,19 @@ func TestManagerEnqueueWeightInstallSuccess(t *testing.T) {
 	t.Parallel()
 
 	s := openTestStore(t)
-	m := New(s, &fakeInstaller{
-		info: &weights.WeightInfo{
-			Name:      "qwen2.5-0.5b",
-			Path:      "/mnt/models/qwen2.5-0.5b",
-			SizeBytes: 123,
+	m := New(Options{
+		Store: s,
+		Weights: &fakeInstaller{
+			info: &weights.WeightInfo{
+				Name:      "qwen2.5-0.5b",
+				Path:      "/mnt/models/qwen2.5-0.5b",
+				SizeBytes: 123,
+			},
 		},
-	}, "token", "venus-model-storage", "/mnt/models")
+		HuggingFaceToken:   "token",
+		WeightsPVCName:     "venus-model-storage",
+		InferenceModelRoot: "/mnt/models",
+	})
 
 	job, err := m.EnqueueWeightInstall(InstallRequest{
 		ModelID: "Qwen/Qwen2.5-0.5B",
@@ -52,9 +58,15 @@ func TestManagerEnqueueWeightInstallFailure(t *testing.T) {
 	t.Parallel()
 
 	s := openTestStore(t)
-	m := New(s, &fakeInstaller{
-		err: errors.New("boom"),
-	}, "token", "venus-model-storage", "/mnt/models")
+	m := New(Options{
+		Store: s,
+		Weights: &fakeInstaller{
+			err: errors.New("boom"),
+		},
+		HuggingFaceToken:   "token",
+		WeightsPVCName:     "venus-model-storage",
+		InferenceModelRoot: "/mnt/models",
+	})
 
 	job, err := m.EnqueueWeightInstall(InstallRequest{
 		ModelID: "Qwen/Qwen2.5-0.5B",

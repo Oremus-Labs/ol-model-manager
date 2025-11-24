@@ -4,32 +4,29 @@ package main
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log"
-	"net/http"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
-	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
 	"github.com/oremus-labs/ol-model-manager/config"
+	"github.com/oremus-labs/ol-model-manager/internal/api"
 	"github.com/oremus-labs/ol-model-manager/internal/catalog"
 	"github.com/oremus-labs/ol-model-manager/internal/catalogwriter"
+	"github.com/oremus-labs/ol-model-manager/internal/events"
 	"github.com/oremus-labs/ol-model-manager/internal/handlers"
 	"github.com/oremus-labs/ol-model-manager/internal/jobs"
 	"github.com/oremus-labs/ol-model-manager/internal/kserve"
 	"github.com/oremus-labs/ol-model-manager/internal/kube"
 	"github.com/oremus-labs/ol-model-manager/internal/recommendations"
+	"github.com/oremus-labs/ol-model-manager/internal/redisx"
 	"github.com/oremus-labs/ol-model-manager/internal/store"
 	"github.com/oremus-labs/ol-model-manager/internal/validator"
 	"github.com/oremus-labs/ol-model-manager/internal/vllm"
 	"github.com/oremus-labs/ol-model-manager/internal/weights"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"k8s.io/client-go/kubernetes"
 )
 
@@ -39,15 +36,6 @@ const (
 )
 
 var (
-	httpRequestsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
-		Name: "model_manager_http_requests_total",
-		Help: "Total HTTP requests processed by the model manager",
-	}, []string{"method", "path", "status"})
-	httpRequestDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
-		Name:    "model_manager_http_request_duration_seconds",
-		Help:    "HTTP request duration",
-		Buckets: prometheus.DefBuckets,
-	}, []string{"method", "path"})
 	weightUsageBytes = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "model_manager_weights_used_bytes",
 		Help: "Used bytes on the Venus PVC",
@@ -125,7 +113,34 @@ func main() {
 		}
 	}
 
-	jobManager := jobs.New(stateStore, weightManager, cfg.HuggingFaceToken, cfg.WeightsPVCName, cfg.InferenceModelRoot)
+	redisClient, err := redisx.NewClient(redisx.Config{
+		Addr:        cfg.RedisAddr,
+		Username:    cfg.RedisUsername,
+		Password:    cfg.RedisPassword,
+		DB:          cfg.RedisDB,
+		TLSEnabled:  cfg.RedisTLSEnabled,
+		TLSInsecure: cfg.RedisTLSInsecure,
+	})
+	if err != nil {
+		log.Fatalf("Failed to initialize Redis client: %v", err)
+	}
+	if redisClient != nil {
+		defer redisClient.Close()
+	}
+	eventBus := events.NewBus(events.Options{
+		Client:  redisClient,
+		Logger:  log.Default(),
+		Channel: cfg.EventsChannel,
+	})
+
+	jobManager := jobs.New(jobs.Options{
+		Store:              stateStore,
+		Weights:            weightManager,
+		HuggingFaceToken:   cfg.HuggingFaceToken,
+		WeightsPVCName:     cfg.WeightsPVCName,
+		InferenceModelRoot: cfg.InferenceModelRoot,
+		EventPublisher:     eventBus,
+	})
 
 	// Initialize catalog validator
 	catalogValidator, err := validator.New(validator.Options{
@@ -168,7 +183,7 @@ func main() {
 	}
 
 	// Initialize handlers
-	h := handlers.New(cat, ksClient, weightManager, vllmDiscovery, catalogValidator, catWriter, advisor, stateStore, jobManager, handlers.Options{
+	h := handlers.New(cat, ksClient, weightManager, vllmDiscovery, catalogValidator, catWriter, advisor, stateStore, jobManager, eventBus, handlers.Options{
 		CatalogTTL:             cfg.CatalogRefreshInterval,
 		WeightsInstallTimeout:  cfg.WeightsInstallTimeout,
 		HuggingFaceToken:       cfg.HuggingFaceToken,
@@ -197,22 +212,9 @@ func main() {
 	startWeightMonitor(rootCtx, weightManager)
 
 	// Setup HTTP server
-	router := setupRouter(h, cfg.APIToken)
-	srv := &http.Server{
-		Addr:         ":" + cfg.ServerPort,
-		Handler:      router,
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 15 * time.Second,
-		IdleTimeout:  60 * time.Second,
-	}
-
-	// Start server in goroutine
-	go func() {
-		log.Printf("Server listening on :%s", cfg.ServerPort)
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("Failed to start server: %v", err)
-		}
-	}()
+	server := api.NewServer(h, api.Options{APIToken: cfg.APIToken})
+	srv := server.Start(":" + cfg.ServerPort)
+	log.Printf("Server listening on :%s", cfg.ServerPort)
 
 	// Wait for interrupt signal for graceful shutdown
 	quit := make(chan os.Signal, 1)
@@ -231,130 +233,6 @@ func main() {
 	}
 
 	log.Println("Server stopped")
-}
-
-func setupRouter(h *handlers.Handler, apiToken string) *gin.Engine {
-	gin.SetMode(gin.ReleaseMode)
-
-	router := gin.New()
-	router.Use(gin.Recovery(), requestIDMiddleware(), metricsMiddleware(), requestLogger())
-
-	// Health check
-	router.GET("/healthz", h.Health)
-	router.GET("/system/info", h.SystemInfo)
-	router.GET("/openapi", h.OpenAPISpec)
-	router.GET("/docs", h.APIDocs)
-	router.GET("/metrics", gin.WrapH(promhttp.Handler()))
-
-	// Model endpoints
-	router.GET("/models", h.ListModels)
-	router.GET("/models/:id", h.GetModel)
-	router.GET("/models/:id/compatibility", h.ModelCompatibility)
-	router.GET("/models/:id/manifest", h.GetModelManifest)
-	router.GET("/active", h.GetActiveModel)
-	router.POST("/catalog/generate", h.GenerateCatalogEntry)
-	router.GET("/recommendations/:gpuType", h.GPURecommendations)
-	router.GET("/recommendations/profiles", h.ListProfiles)
-
-	// Weight endpoints
-	router.GET("/weights", h.ListWeights)
-	router.GET("/weights/usage", h.GetWeightUsage)
-	router.GET("/weights/info", h.GetWeightInfo)
-
-	// HuggingFace discovery
-	router.GET("/huggingface/search", h.SearchHuggingFace)
-	router.GET("/huggingface/models/*id", h.GetHuggingFaceModel)
-
-	// vLLM discovery endpoints
-	router.GET("/vllm/supported-models", h.ListVLLMArchitectures)
-	router.GET("/vllm/model/:architecture", h.GetVLLMArchitecture)
-	router.POST("/vllm/discover", h.DiscoverModel)
-	router.POST("/vllm/model-info", h.DescribeVLLMModel)
-
-	protected := router.Group("/")
-	protected.Use(authMiddleware(apiToken))
-	protected.POST("/models/activate", h.ActivateModel)
-	protected.POST("/models/deactivate", h.DeactivateModel)
-	protected.POST("/models/test", h.TestModel)
-	protected.POST("/catalog/preview", h.PreviewCatalog)
-	protected.POST("/refresh", h.RefreshCatalog)
-	protected.POST("/catalog/validate", h.ValidateCatalog)
-	protected.POST("/catalog/pr", h.CreateCatalogPR)
-	protected.POST("/weights/install", h.InstallWeights)
-	protected.DELETE("/weights", h.DeleteWeights)
-	protected.GET("/weights/install/status/:id", h.GetJob)
-	protected.GET("/jobs", h.ListJobs)
-	protected.GET("/jobs/:id", h.GetJob)
-	protected.DELETE("/jobs", h.DeleteJobs)
-	protected.GET("/history", h.ListHistory)
-	protected.DELETE("/history", h.ClearHistory)
-
-	return router
-}
-
-func requestLogger() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		start := time.Now()
-		path := c.Request.URL.Path
-		method := c.Request.Method
-
-		c.Next()
-
-		latency := time.Since(start)
-		statusCode := c.Writer.Status()
-
-		requestID, _ := c.Get("requestID")
-		log.Printf("%s %s %d %s request_id=%v", method, path, statusCode, latency, requestID)
-	}
-}
-
-func requestIDMiddleware() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		id := c.GetHeader("X-Request-ID")
-		if id == "" {
-			id = uuid.NewString()
-		}
-		c.Set("requestID", id)
-		c.Writer.Header().Set("X-Request-ID", id)
-		c.Next()
-	}
-}
-
-func metricsMiddleware() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		start := time.Now()
-		c.Next()
-		path := c.FullPath()
-		if path == "" {
-			path = c.Request.URL.Path
-		}
-		status := fmt.Sprintf("%d", c.Writer.Status())
-		httpRequestsTotal.WithLabelValues(c.Request.Method, path, status).Inc()
-		httpRequestDuration.WithLabelValues(c.Request.Method, path).Observe(time.Since(start).Seconds())
-	}
-}
-
-func authMiddleware(token string) gin.HandlerFunc {
-	if token == "" {
-		return func(c *gin.Context) {
-			c.Next()
-		}
-	}
-	return func(c *gin.Context) {
-		header := c.GetHeader("Authorization")
-		if strings.HasPrefix(header, "Bearer ") {
-			header = strings.TrimSpace(strings.TrimPrefix(header, "Bearer "))
-		}
-		if header == "" {
-			header = c.GetHeader("X-API-Key")
-		}
-
-		if header != token {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
-			return
-		}
-		c.Next()
-	}
 }
 
 func startWeightMonitor(ctx context.Context, wm *weights.Manager) {

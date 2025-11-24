@@ -12,6 +12,7 @@ import (
 
 	"github.com/oremus-labs/ol-model-manager/internal/catalog"
 
+	_ "github.com/jackc/pgx/v5/stdlib"
 	_ "modernc.org/sqlite"
 )
 
@@ -49,9 +50,10 @@ type HistoryEntry struct {
 	CreatedAt time.Time              `json:"createdAt"`
 }
 
-// Store wraps the SQLite database used for persistence.
+// Store wraps the persistence database used for jobs + history.
 type Store struct {
-	db *sql.DB
+	db     *sql.DB
+	driver string
 }
 
 // Open initializes the datastore using the supplied DSN/file path and driver.
@@ -59,31 +61,43 @@ func Open(dsn string, driver string) (*Store, error) {
 	if driver == "" {
 		driver = "sqlite"
 	}
-	if driver != "sqlite" {
-		return nil, fmt.Errorf("unsupported datastore driver: %s", driver)
-	}
 	if strings.TrimSpace(dsn) == "" {
 		return nil, errors.New("datastore DSN is required")
 	}
-	if err := os.MkdirAll(filepath.Dir(dsn), 0o755); err != nil {
-		return nil, fmt.Errorf("failed to create datastore directory: %w", err)
+
+	var (
+		db  *sql.DB
+		err error
+	)
+
+	switch driver {
+	case "sqlite":
+		if err := os.MkdirAll(filepath.Dir(dsn), 0o755); err != nil {
+			return nil, fmt.Errorf("failed to create datastore directory: %w", err)
+		}
+		conn := fmt.Sprintf("file:%s?_busy_timeout=5000&_journal_mode=WAL&_foreign_keys=on", dsn)
+		db, err = sql.Open("sqlite", conn)
+	case "postgres":
+		db, err = sql.Open("pgx", dsn)
+	default:
+		return nil, fmt.Errorf("unsupported datastore driver: %s", driver)
 	}
-	conn := fmt.Sprintf("file:%s?_busy_timeout=5000&_journal_mode=WAL&_foreign_keys=on", dsn)
-	db, err := sql.Open("sqlite", conn)
 	if err != nil {
-		return nil, fmt.Errorf("failed to open sqlite datastore: %w", err)
+		return nil, fmt.Errorf("failed to open datastore: %w", err)
 	}
-	if err := initSchema(db); err != nil {
+	if err := initSchema(db, driver); err != nil {
 		db.Close()
 		return nil, err
 	}
-	return &Store{db: db}, nil
+	return &Store{db: db, driver: driver}, nil
 }
 
-func initSchema(db *sql.DB) error {
-	stmts := []string{
-		`PRAGMA journal_mode=WAL;`,
-		`CREATE TABLE IF NOT EXISTS jobs (
+func initSchema(db *sql.DB, driver string) error {
+	var stmts []string
+	if driver == "sqlite" {
+		stmts = append(stmts, `PRAGMA journal_mode=WAL;`)
+	}
+	jobTable := `CREATE TABLE IF NOT EXISTS jobs (
 			id TEXT PRIMARY KEY,
 			type TEXT NOT NULL,
 			status TEXT NOT NULL,
@@ -95,28 +109,71 @@ func initSchema(db *sql.DB) error {
 			error TEXT,
 			created_at TIMESTAMP NOT NULL,
 			updated_at TIMESTAMP NOT NULL
-		);`,
-		`CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);`,
-		`CREATE INDEX IF NOT EXISTS idx_jobs_type ON jobs(type);`,
-		`CREATE TABLE IF NOT EXISTS history (
+		);`
+	historyTable := `CREATE TABLE IF NOT EXISTS history (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			event TEXT NOT NULL,
 			model_id TEXT,
 			metadata TEXT,
 			created_at TIMESTAMP NOT NULL
-		);`,
+		);`
+	if driver == "postgres" {
+		jobTable = `CREATE TABLE IF NOT EXISTS jobs (
+			id TEXT PRIMARY KEY,
+			type TEXT NOT NULL,
+			status TEXT NOT NULL,
+			stage TEXT,
+			progress INTEGER DEFAULT 0,
+			message TEXT,
+			payload TEXT,
+			result TEXT,
+			error TEXT,
+			created_at TIMESTAMPTZ NOT NULL,
+			updated_at TIMESTAMPTZ NOT NULL
+		);`
+		historyTable = `CREATE TABLE IF NOT EXISTS history (
+			id BIGSERIAL PRIMARY KEY,
+			event TEXT NOT NULL,
+			model_id TEXT,
+			metadata TEXT,
+			created_at TIMESTAMPTZ NOT NULL
+		);`
+	}
+	stmts = append(stmts,
+		jobTable,
+		`CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);`,
+		`CREATE INDEX IF NOT EXISTS idx_jobs_type ON jobs(type);`,
+		historyTable,
 		`CREATE TABLE IF NOT EXISTS catalog_cache (
 			id INTEGER PRIMARY KEY CHECK (id = 1),
 			snapshot TEXT NOT NULL,
 			updated_at TIMESTAMP NOT NULL
 		);`,
-	}
+	)
 	for _, stmt := range stmts {
 		if _, err := db.Exec(stmt); err != nil {
 			return fmt.Errorf("schema apply failed: %w", err)
 		}
 	}
 	return nil
+}
+
+func (s *Store) rebind(query string) string {
+	if s == nil || s.driver != "postgres" {
+		return query
+	}
+	var builder strings.Builder
+	builder.Grow(len(query) + 8)
+	arg := 1
+	for _, ch := range query {
+		if ch == '?' {
+			builder.WriteString(fmt.Sprintf("$%d", arg))
+			arg++
+			continue
+		}
+		builder.WriteRune(ch)
+	}
+	return builder.String()
 }
 
 // Close shuts down the datastore.
@@ -146,8 +203,8 @@ func (s *Store) CreateJob(job *Job) error {
 	if err != nil {
 		return err
 	}
-	_, err = s.db.Exec(`INSERT INTO jobs (id, type, status, stage, progress, message, payload, result, error, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	_, err = s.db.Exec(s.rebind(`INSERT INTO jobs (id, type, status, stage, progress, message, payload, result, error, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
 		job.ID, job.Type, job.Status, job.Stage, job.Progress, job.Message, string(payload), string(result), job.Error, job.CreatedAt, job.UpdatedAt,
 	)
 	return err
@@ -164,7 +221,7 @@ func (s *Store) UpdateJob(job *Job) error {
 	if err != nil {
 		return err
 	}
-	_, err = s.db.Exec(`UPDATE jobs SET type=?, status=?, stage=?, progress=?, message=?, payload=?, result=?, error=?, updated_at=? WHERE id=?`,
+	_, err = s.db.Exec(s.rebind(`UPDATE jobs SET type=?, status=?, stage=?, progress=?, message=?, payload=?, result=?, error=?, updated_at=? WHERE id=?`),
 		job.Type, job.Status, job.Stage, job.Progress, job.Message, string(payload), string(result), job.Error, job.UpdatedAt, job.ID,
 	)
 	return err
@@ -172,7 +229,7 @@ func (s *Store) UpdateJob(job *Job) error {
 
 // GetJob loads a job by ID.
 func (s *Store) GetJob(id string) (*Job, error) {
-	row := s.db.QueryRow(`SELECT id, type, status, stage, progress, message, payload, result, error, created_at, updated_at FROM jobs WHERE id=?`, id)
+	row := s.db.QueryRow(s.rebind(`SELECT id, type, status, stage, progress, message, payload, result, error, created_at, updated_at FROM jobs WHERE id=?`), id)
 	var (
 		job     Job
 		payload sql.NullString
@@ -196,7 +253,7 @@ func (s *Store) ListJobs(limit int) ([]Job, error) {
 	if limit > 0 {
 		query = fmt.Sprintf("%s LIMIT %d", query, limit)
 	}
-	rows, err := s.db.Query(query)
+	rows, err := s.db.Query(s.rebind(query))
 	if err != nil {
 		return nil, err
 	}
@@ -226,7 +283,7 @@ func (s *Store) AppendHistory(entry *HistoryEntry) error {
 	if err != nil {
 		return err
 	}
-	res, err := s.db.Exec(`INSERT INTO history (event, model_id, metadata, created_at) VALUES (?, ?, ?, ?)`,
+	res, err := s.db.Exec(s.rebind(`INSERT INTO history (event, model_id, metadata, created_at) VALUES (?, ?, ?, ?)`),
 		entry.Event, entry.ModelID, string(metadata), entry.CreatedAt,
 	)
 	if err != nil {
@@ -244,7 +301,7 @@ func (s *Store) ListHistory(limit int) ([]HistoryEntry, error) {
 	if limit > 0 {
 		query = fmt.Sprintf("%s LIMIT %d", query, limit)
 	}
-	rows, err := s.db.Query(query)
+	rows, err := s.db.Query(s.rebind(query))
 	if err != nil {
 		return nil, err
 	}
@@ -277,7 +334,7 @@ func (s *Store) DeleteJobs(status string) error {
 		query += " WHERE status = ?"
 		args = append(args, status)
 	}
-	_, err := s.db.Exec(query, args...)
+	_, err := s.db.Exec(s.rebind(query), args...)
 	return err
 }
 
@@ -299,9 +356,9 @@ func (s *Store) SaveCatalogSnapshot(models []*catalog.Model) error {
 	if err != nil {
 		return fmt.Errorf("failed to marshal catalog snapshot: %w", err)
 	}
-	_, err = s.db.Exec(`INSERT INTO catalog_cache (id, snapshot, updated_at)
+	_, err = s.db.Exec(s.rebind(`INSERT INTO catalog_cache (id, snapshot, updated_at)
 		VALUES (1, ?, ?)
-		ON CONFLICT(id) DO UPDATE SET snapshot=excluded.snapshot, updated_at=excluded.updated_at`,
+		ON CONFLICT(id) DO UPDATE SET snapshot=excluded.snapshot, updated_at=excluded.updated_at`),
 		string(data), time.Now().UTC(),
 	)
 	return err
@@ -312,7 +369,7 @@ func (s *Store) LoadCatalogSnapshot() ([]*catalog.Model, time.Time, error) {
 	if s == nil || s.db == nil {
 		return nil, time.Time{}, errors.New("datastore not configured")
 	}
-	row := s.db.QueryRow(`SELECT snapshot, updated_at FROM catalog_cache WHERE id = 1`)
+	row := s.db.QueryRow(s.rebind(`SELECT snapshot, updated_at FROM catalog_cache WHERE id = 1`))
 	var snapshot string
 	var updated time.Time
 	if err := row.Scan(&snapshot, &updated); err != nil {

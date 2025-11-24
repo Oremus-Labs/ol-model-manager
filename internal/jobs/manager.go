@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/oremus-labs/ol-model-manager/internal/events"
 	"github.com/oremus-labs/ol-model-manager/internal/store"
 	"github.com/oremus-labs/ol-model-manager/internal/weights"
 )
@@ -20,20 +21,36 @@ type Manager struct {
 	hfToken   string
 	pvcName   string
 	modelRoot string
+	events    eventPublisher
 }
 
 type weightStore interface {
 	InstallFromHuggingFace(context.Context, weights.InstallOptions) (*weights.WeightInfo, error)
 }
 
+type eventPublisher interface {
+	Publish(context.Context, events.Event) error
+}
+
+// Options configures the job manager.
+type Options struct {
+	Store              *store.Store
+	Weights            weightStore
+	HuggingFaceToken   string
+	WeightsPVCName     string
+	InferenceModelRoot string
+	EventPublisher     eventPublisher
+}
+
 // New creates a job manager.
-func New(s *store.Store, w weightStore, hfToken, pvcName, modelRoot string) *Manager {
+func New(opts Options) *Manager {
 	return &Manager{
-		store:     s,
-		weights:   w,
-		hfToken:   hfToken,
-		pvcName:   pvcName,
-		modelRoot: modelRoot,
+		store:     opts.Store,
+		weights:   opts.Weights,
+		hfToken:   opts.HuggingFaceToken,
+		pvcName:   opts.WeightsPVCName,
+		modelRoot: opts.InferenceModelRoot,
+		events:    opts.EventPublisher,
 	}
 }
 
@@ -141,7 +158,9 @@ func (m *Manager) updateJob(job *store.Job, status store.JobStatus, progress int
 	}
 	if err := m.store.UpdateJob(job); err != nil {
 		log.Printf("jobs: failed to update job %s: %v", job.ID, err)
+		return
 	}
+	m.emitJobEvent(job)
 }
 
 func (m *Manager) appendHistory(id, event, modelID string, meta map[string]interface{}) {
@@ -168,4 +187,19 @@ func (m *Manager) inferencePath(name string) string {
 		return ""
 	}
 	return path.Join(m.modelRoot, name)
+}
+
+func (m *Manager) emitJobEvent(job *store.Job) {
+	if m.events == nil || job == nil {
+		return
+	}
+	payload := *job
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := m.events.Publish(ctx, events.Event{
+		Type: fmt.Sprintf("job.%s", job.Status),
+		Data: payload,
+	}); err != nil {
+		log.Printf("jobs: failed to publish event for job %s: %v", job.ID, err)
+	}
 }

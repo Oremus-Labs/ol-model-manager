@@ -20,6 +20,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/oremus-labs/ol-model-manager/internal/catalog"
 	"github.com/oremus-labs/ol-model-manager/internal/catalogwriter"
+	"github.com/oremus-labs/ol-model-manager/internal/events"
 	"github.com/oremus-labs/ol-model-manager/internal/jobs"
 	"github.com/oremus-labs/ol-model-manager/internal/kserve"
 	"github.com/oremus-labs/ol-model-manager/internal/openapi"
@@ -88,6 +89,11 @@ type jobManager interface {
 	EnqueueWeightInstall(jobs.InstallRequest) (*store.Job, error)
 }
 
+type eventBus interface {
+	Publish(context.Context, events.Event) error
+	Subscribe(context.Context) (<-chan events.Event, func(), error)
+}
+
 type recommendationService interface {
 	Compatibility(*catalog.Model, string) recommendations.CompatibilityReport
 	Recommend(string) recommendations.Recommendation
@@ -106,6 +112,7 @@ type Handler struct {
 	advisor recommendationService
 	store   *store.Store
 	jobs    jobManager
+	events  eventBus
 	opts    Options
 
 	catalogMu          sync.Mutex
@@ -115,7 +122,7 @@ type Handler struct {
 }
 
 // New creates a new Handler instance.
-func New(cat *catalog.Catalog, ks *kserve.Client, wm weightStore, vdisc discoveryService, val catalogValidator, writer catalogWriter, advisor recommendationService, dataStore *store.Store, jobMgr jobManager, opts Options) *Handler {
+func New(cat *catalog.Catalog, ks *kserve.Client, wm weightStore, vdisc discoveryService, val catalogValidator, writer catalogWriter, advisor recommendationService, dataStore *store.Store, jobMgr jobManager, evt eventBus, opts Options) *Handler {
 	if opts.CatalogTTL <= 0 {
 		opts.CatalogTTL = time.Minute
 	}
@@ -167,6 +174,7 @@ func New(cat *catalog.Catalog, ks *kserve.Client, wm weightStore, vdisc discover
 		advisor:            advisor,
 		store:              dataStore,
 		jobs:               jobMgr,
+		events:             evt,
 		opts:               opts,
 		lastCatalogRefresh: time.Time{},
 		catalogStatus:      "unknown",
@@ -219,6 +227,41 @@ type catalogPRRequest struct {
 	Body     string        `json:"body,omitempty"`
 	Draft    bool          `json:"draft"`
 	Validate bool          `json:"validate"`
+}
+
+// StreamEvents streams live control-plane events via SSE.
+func (h *Handler) StreamEvents(c *gin.Context) {
+	if h.events == nil {
+		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "event streaming unavailable"})
+		return
+	}
+
+	ctx, cancel := context.WithCancel(c.Request.Context())
+	defer cancel()
+
+	stream, unsubscribe, err := h.events.Subscribe(ctx)
+	if err != nil {
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "failed to subscribe"})
+		return
+	}
+	defer unsubscribe()
+
+	c.Writer.Header().Set("Content-Type", "text/event-stream")
+	c.Writer.Header().Set("Cache-Control", "no-cache")
+	c.Writer.Header().Set("Connection", "keep-alive")
+
+	c.Stream(func(w io.Writer) bool {
+		select {
+		case evt, ok := <-stream:
+			if !ok {
+				return false
+			}
+			c.SSEvent(evt.Type, evt)
+			return true
+		case <-ctx.Done():
+			return false
+		}
+	})
 }
 
 // Health returns the health status of the service.

@@ -1,5 +1,5 @@
 # Build stage
-FROM golang:1.22-alpine AS builder
+FROM golang:1.23-alpine AS builder
 
 WORKDIR /build
 
@@ -13,12 +13,12 @@ COPY go.mod go.sum* ./
 RUN go mod download
 
 # Copy source code
-COPY cmd/ ./cmd/
-COPY config/ ./config/
-COPY internal/ ./internal/
+COPY . .
 
-# Build the binary
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -ldflags="-w -s" -o model-manager ./cmd/server
+# Build binaries
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -ldflags="-w -s" -o bin/model-manager ./cmd/server
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -ldflags="-w -s" -o bin/model-manager-worker ./cmd/worker
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -ldflags="-w -s" -o bin/model-manager-sync ./cmd/sync
 
 # Final stage
 FROM alpine:latest
@@ -29,7 +29,9 @@ WORKDIR /app
 RUN mkdir -p /app/config
 
 # Copy the binary from builder
-COPY --from=builder /build/model-manager .
+COPY --from=builder /build/bin/model-manager .
+COPY --from=builder /build/bin/model-manager-worker .
+COPY --from=builder /build/bin/model-manager-sync .
 COPY config/gpu-profiles.json /app/config/gpu-profiles.json
 
 # Create non-root user
