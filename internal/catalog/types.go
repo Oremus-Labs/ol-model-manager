@@ -5,6 +5,7 @@ type Model struct {
 	ID           string            `json:"id"`
 	DisplayName  string            `json:"displayName,omitempty"`
 	HFModelID    string            `json:"hfModelId,omitempty"`
+	ServedModelName string         `json:"servedModelName,omitempty"`
 	StorageURI   string            `json:"storageUri,omitempty"`
 	Runtime      string            `json:"runtime,omitempty"`
 	Env          []EnvVar          `json:"env,omitempty"`

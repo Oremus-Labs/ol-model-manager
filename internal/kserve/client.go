@@ -211,7 +211,7 @@ func buildInferenceService(namespace, name string, model *catalog.Model, inferen
 	}
 
 	// Add vLLM args if configured
-	if vllmArgs := buildVLLMArgs(model.VLLM); len(vllmArgs) > 0 {
+	if vllmArgs := buildVLLMArgs(model); len(vllmArgs) > 0 {
 		modelSpec["args"] = vllmArgs
 	}
 
@@ -288,31 +288,45 @@ func (c *Client) RenderManifest(model *catalog.Model) map[string]interface{} {
 	return deepCopyMap(isvc.Object)
 }
 
-func buildVLLMArgs(vllm *catalog.VLLMConfig) []string {
-	if vllm == nil {
+func buildVLLMArgs(model *catalog.Model) []string {
+	if model == nil {
 		return nil
 	}
 
 	var args []string
+	vllm := model.VLLM
 
-	if vllm.TensorParallelSize != nil {
-		args = append(args, "--tensor-parallel-size", fmt.Sprintf("%d", *vllm.TensorParallelSize))
+	if vllm != nil {
+		if vllm.TensorParallelSize != nil {
+			args = append(args, "--tensor-parallel-size", fmt.Sprintf("%d", *vllm.TensorParallelSize))
+		}
+
+		if vllm.Dtype != "" {
+			args = append(args, "--dtype", vllm.Dtype)
+		}
+
+		if vllm.GPUMemoryUtilization != nil {
+			args = append(args, "--gpu-memory-utilization", fmt.Sprintf("%f", *vllm.GPUMemoryUtilization))
+		}
+
+		if vllm.MaxModelLen != nil {
+			args = append(args, "--max-model-len", fmt.Sprintf("%d", *vllm.MaxModelLen))
+		}
+
+		if vllm.TrustRemoteCode != nil && *vllm.TrustRemoteCode {
+			args = append(args, "--trust-remote-code")
+		}
 	}
 
-	if vllm.Dtype != "" {
-		args = append(args, "--dtype", vllm.Dtype)
+	var servedName string
+	switch {
+	case model.ServedModelName != "":
+		servedName = model.ServedModelName
+	case model.HFModelID != "":
+		servedName = model.HFModelID
 	}
-
-	if vllm.GPUMemoryUtilization != nil {
-		args = append(args, "--gpu-memory-utilization", fmt.Sprintf("%f", *vllm.GPUMemoryUtilization))
-	}
-
-	if vllm.MaxModelLen != nil {
-		args = append(args, "--max-model-len", fmt.Sprintf("%d", *vllm.MaxModelLen))
-	}
-
-	if vllm.TrustRemoteCode != nil && *vllm.TrustRemoteCode {
-		args = append(args, "--trust-remote-code")
+	if servedName != "" {
+		args = append(args, "--served-model-name", servedName)
 	}
 
 	return args
