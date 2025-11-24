@@ -239,30 +239,44 @@ func (h *Handler) StreamEvents(c *gin.Context) {
 	ctx, cancel := context.WithCancel(c.Request.Context())
 	defer cancel()
 
-	stream, unsubscribe, err := h.events.Subscribe(ctx)
+	c.Writer.Header().Set("Content-Type", "text/event-stream")
+	c.Writer.Header().Set("Cache-Control", "no-cache")
+	c.Writer.Header().Set("Connection", "keep-alive")
+
+	out := make(chan events.Event, 16)
+
+	if h.store != nil {
+		if jobs, err := h.store.ListJobs(5); err == nil {
+			for _, job := range jobs {
+				out <- events.Event{
+					Type: fmt.Sprintf("job.%s", job.Status),
+					Data: job,
+				}
+			}
+		}
+	}
+
+	eventStream, unsubscribe, err := h.events.Subscribe(ctx)
 	if err != nil {
 		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "failed to subscribe"})
 		return
 	}
 	defer unsubscribe()
 
-	c.Writer.Header().Set("Content-Type", "text/event-stream")
-	c.Writer.Header().Set("Cache-Control", "no-cache")
-	c.Writer.Header().Set("Connection", "keep-alive")
-
-	// Prime the stream with the latest jobs so clients immediately see something meaningful.
-	if h.store != nil {
-		if jobs, err := h.store.ListJobs(5); err == nil {
-			for _, job := range jobs {
-				c.SSEvent(fmt.Sprintf("job.%s", job.Status), job)
+	go func() {
+		for evt := range eventStream {
+			select {
+			case out <- evt:
+			case <-ctx.Done():
+				return
 			}
-			c.Writer.Flush()
 		}
-	}
+		close(out)
+	}()
 
 	c.Stream(func(w io.Writer) bool {
 		select {
-		case evt, ok := <-stream:
+		case evt, ok := <-out:
 			if !ok {
 				return false
 			}
