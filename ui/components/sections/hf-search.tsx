@@ -55,7 +55,9 @@ export function HuggingFaceSearch({ query, results }: Props) {
 
 function SearchResultCard({ insight }: { insight: ModelInsight }) {
   const modelId = insight.huggingFace.modelId ?? insight.huggingFace.id;
-  const defaultTarget = insight.huggingFace.id || slugifyModel(modelId);
+  const fallbackId = modelId ?? insight.huggingFace.id ?? 'model';
+  const canonicalId = insight.huggingFace.modelId || insight.huggingFace.id || fallbackId;
+  const defaultTarget = canonicalId || slugifyModel(fallbackId);
 
   return (
     <article className="rounded-2xl border border-white/5 bg-slate-900/30 p-4 shadow-card">
@@ -106,6 +108,15 @@ function SearchResultCard({ insight }: { insight: ModelInsight }) {
                   name="revision"
                   placeholder="main"
                   className="mt-1 w-full rounded-md border border-white/10 bg-slate-900/70 px-3 py-2 text-sm text-white focus:border-brand-400 focus:outline-none"
+                />
+              </label>
+              <label className="text-xs uppercase tracking-wide text-slate-400">
+                Limit to specific files (optional)
+                <textarea
+                  name="files"
+                  placeholder="config.json&#10;pytorch_model.bin"
+                  className="mt-1 w-full rounded-md border border-white/10 bg-slate-900/70 px-3 py-2 text-sm text-white focus:border-brand-400 focus:outline-none"
+                  rows={3}
                 />
               </label>
               <label className="flex items-center gap-2 text-xs text-slate-300">

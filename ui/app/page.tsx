@@ -9,6 +9,7 @@ import { QuickActions } from '@/components/sections/quick-actions';
 import { HuggingFaceSearch } from '@/components/sections/hf-search';
 import { TopBar } from '@/components/layout/topbar';
 import { ActiveModelPanel } from '@/components/sections/active-model-panel';
+import { SectionTabs } from '@/components/layout/section-tabs';
 import { getActiveService, getHistory, getJobs, getModels, getSystemInfo, getWeights, searchHuggingFace } from '@/lib/api';
 
 export const dynamic = 'force-dynamic';
@@ -45,6 +46,8 @@ export default async function Page({ searchParams }: PageProps) {
       </section>
 
       <TopBar activeService={activeService} models={models} jobs={jobs} history={history} />
+
+      <SectionTabs />
 
       <Section title="Active deployment" description="Live readiness from the Knative service" id="active">
         <ActiveModelPanel service={activeService} models={models} />

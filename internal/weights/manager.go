@@ -233,6 +233,7 @@ func (m *Manager) Delete(modelName string) error {
 	}
 
 	m.cleanupEmptyParents(modelPath)
+	m.removeHuggingFaceCache(rel)
 
 	return nil
 }
@@ -369,6 +370,10 @@ func (m *Manager) InstallFromHuggingFace(ctx context.Context, opts InstallOption
 	}
 	if err := writeMetadata(destPath, meta); err != nil {
 		log.Printf("weights: failed to write metadata for %s: %v", target, err)
+	}
+
+	if err := m.populateHuggingFaceCache(opts.ModelID, revision, destPath); err != nil {
+		log.Printf("weights: failed to hydrate HuggingFace cache for %s: %v", target, err)
 	}
 
 	if opts.Progress != nil {
@@ -601,4 +606,67 @@ func (m *Manager) cleanupEmptyParents(modelPath string) {
 		}
 		current = filepath.Dir(current)
 	}
+}
+
+func (m *Manager) populateHuggingFaceCache(modelID, revision, sourceDir string) error {
+	if modelID == "" {
+		return nil
+	}
+	if revision == "" {
+		revision = "main"
+	}
+	cacheBase := filepath.Join(m.storagePath, ".hf-cache", "hub", formatHFCacheModelID(modelID))
+	snapshotDir := filepath.Join(cacheBase, "snapshots", revision)
+	if err := os.RemoveAll(snapshotDir); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(snapshotDir, 0o755); err != nil {
+		return err
+	}
+
+	err := filepath.WalkDir(sourceDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(sourceDir, path)
+		if err != nil {
+			return err
+		}
+		if rel == "." {
+			return nil
+		}
+		target := filepath.Join(snapshotDir, rel)
+		if d.IsDir() {
+			return os.MkdirAll(target, 0o755)
+		}
+		if d.Name() == metadataFilename {
+			return nil
+		}
+		_ = os.Remove(target)
+		return os.Symlink(path, target)
+	})
+	if err != nil {
+		return err
+	}
+
+	if err := os.MkdirAll(filepath.Join(cacheBase, "refs"), 0o755); err != nil {
+		return err
+	}
+	refFile := filepath.Join(cacheBase, "refs", revision)
+	return os.WriteFile(refFile, []byte(revision), 0o644)
+}
+
+func (m *Manager) removeHuggingFaceCache(modelName string) {
+	if modelName == "" {
+		return
+	}
+	cacheDir := filepath.Join(m.storagePath, ".hf-cache", "hub", formatHFCacheModelID(modelName))
+	_ = os.RemoveAll(cacheDir)
+}
+
+func formatHFCacheModelID(modelID string) string {
+	modelID = strings.TrimSpace(modelID)
+	modelID = strings.Trim(modelID, "/")
+	modelID = strings.ReplaceAll(modelID, "/", "--")
+	return fmt.Sprintf("models--%s", modelID)
 }

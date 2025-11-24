@@ -36,12 +36,23 @@ export async function installWeightsAction(_: ActionState, formData: FormData): 
     if (!hfModelId) {
       return { ok: false, message: 'Hugging Face model ID is required' };
     }
-    const payload = {
+    const filesRaw = formData.get('files')?.toString();
+    let files: string[] | undefined;
+    if (filesRaw) {
+      files = filesRaw
+        .split(/[\n,]/)
+        .map((entry) => entry.trim())
+        .filter(Boolean);
+    }
+    const payload: Record<string, unknown> = {
       hfModelId,
       revision: formData.get('revision')?.toString().trim() || undefined,
       target: formData.get('target')?.toString().trim() || undefined,
       overwrite: formData.get('overwrite') === 'on',
     };
+    if (files && files.length > 0) {
+      payload.files = files;
+    }
     const response = await authorizedFetch('/weights/install', {
       method: 'POST',
       body: JSON.stringify(payload),
@@ -100,5 +111,27 @@ export async function deactivateModelAction(_: ActionState, __?: FormData): Prom
     return { ok: true, message: 'Deactivated active model' };
   } catch (err) {
     return { ok: false, message: err instanceof Error ? err.message : 'Failed to deactivate model' };
+  }
+}
+
+export async function clearJobsAction(_: ActionState, formData: FormData): Promise<ActionState> {
+  try {
+    const status = formData.get('status')?.toString().trim();
+    const path = status ? `/jobs?status=${encodeURIComponent(status)}` : '/jobs';
+    await authorizedFetch(path, { method: 'DELETE' });
+    revalidatePath('/');
+    return { ok: true, message: status ? `Cleared jobs with status ${status}` : 'Cleared all jobs' };
+  } catch (err) {
+    return { ok: false, message: err instanceof Error ? err.message : 'Failed to clear jobs' };
+  }
+}
+
+export async function clearHistoryAction(_: ActionState): Promise<ActionState> {
+  try {
+    await authorizedFetch('/history', { method: 'DELETE' });
+    revalidatePath('/');
+    return { ok: true, message: 'History cleared' };
+  } catch (err) {
+    return { ok: false, message: err instanceof Error ? err.message : 'Failed to clear history' };
   }
 }

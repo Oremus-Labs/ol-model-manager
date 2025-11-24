@@ -50,6 +50,22 @@ func TestInstallFromHuggingFaceDownloadsFiles(t *testing.T) {
 	if info.SizeBytes != int64(len("tiny-model")) {
 		t.Fatalf("expected size %d, got %d", len("tiny-model"), info.SizeBytes)
 	}
+
+	cacheFile := filepath.Join(tmpDir, ".hf-cache", "hub", "models--Qwen--Qwen2.5-0.5B", "snapshots", "main", "model.safetensors")
+	cacheInfo, err := os.Lstat(cacheFile)
+	if err != nil {
+		t.Fatalf("expected cache snapshot symlink at %s: %v", cacheFile, err)
+	}
+	if cacheInfo.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("expected %s to be a symlink", cacheFile)
+	}
+	targetPath, err := os.Readlink(cacheFile)
+	if err != nil {
+		t.Fatalf("failed to read symlink: %v", err)
+	}
+	if targetPath != expectedPath {
+		t.Fatalf("expected cache symlink target %s, got %s", expectedPath, targetPath)
+	}
 }
 
 func TestListSkipsReservedAndHiddenDirs(t *testing.T) {

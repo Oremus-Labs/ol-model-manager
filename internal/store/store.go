@@ -266,6 +266,30 @@ func (s *Store) ListHistory(limit int) ([]HistoryEntry, error) {
 	return entries, rows.Err()
 }
 
+// DeleteJobs removes jobs optionally filtered by status.
+func (s *Store) DeleteJobs(status string) error {
+	if s == nil || s.db == nil {
+		return errors.New("datastore not configured")
+	}
+	query := "DELETE FROM jobs"
+	var args []interface{}
+	if status != "" {
+		query += " WHERE status = ?"
+		args = append(args, status)
+	}
+	_, err := s.db.Exec(query, args...)
+	return err
+}
+
+// ClearHistory deletes all history entries.
+func (s *Store) ClearHistory() error {
+	if s == nil || s.db == nil {
+		return errors.New("datastore not configured")
+	}
+	_, err := s.db.Exec("DELETE FROM history")
+	return err
+}
+
 // SaveCatalogSnapshot persists the catalog contents for reuse when git-sync is cold.
 func (s *Store) SaveCatalogSnapshot(models []*catalog.Model) error {
 	if s == nil || s.db == nil {

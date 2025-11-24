@@ -596,6 +596,34 @@ func (h *Handler) DeleteWeights(c *gin.Context) {
 	h.recordHistory("weight_deleted", req.Name, nil)
 }
 
+// DeleteJobs clears job records (optionally filtered by status).
+func (h *Handler) DeleteJobs(c *gin.Context) {
+	if h.store == nil {
+		c.JSON(http.StatusNotImplemented, gin.H{"error": "persistent store not configured"})
+		return
+	}
+	status := strings.TrimSpace(c.Query("status"))
+	if err := h.store.DeleteJobs(status); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	h.recordHistory("jobs_purged", "", map[string]interface{}{"status": status})
+	c.JSON(http.StatusOK, gin.H{"status": "deleted", "filteredStatus": status})
+}
+
+// ClearHistory removes all history entries.
+func (h *Handler) ClearHistory(c *gin.Context) {
+	if h.store == nil {
+		c.JSON(http.StatusNotImplemented, gin.H{"error": "persistent store not configured"})
+		return
+	}
+	if err := h.store.ClearHistory(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "cleared"})
+}
+
 // GetWeightUsage returns PVC usage statistics.
 func (h *Handler) GetWeightUsage(c *gin.Context) {
 	if h.weights == nil {
@@ -711,7 +739,7 @@ func (h *Handler) InstallWeights(c *gin.Context) {
 	}
 	if storageURI != "" {
 		response["storageUri"] = storageURI
-		response["catalogInstructions"] = fmt.Sprintf("Set storageUri to %s and MODEL_ID (or equivalent env) to %s", storageURI, modelPath)
+		response["catalogInstructions"] = fmt.Sprintf("Set storageUri to %s and keep MODEL_ID (or equivalent env) pointed at %s", storageURI, req.HFModelID)
 	}
 
 	h.recordHistory("weight_install_completed", req.HFModelID, map[string]interface{}{

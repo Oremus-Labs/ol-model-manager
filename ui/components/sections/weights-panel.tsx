@@ -20,6 +20,8 @@ export function WeightsPanel({ weights }: Props) {
             <p className="text-sm text-slate-300">
               {formatBytes(weight.sizeBytes)} • {weight.fileCount} files • Updated {formatDate(weight.modifiedTime)}
             </p>
+            {weight.hfModelId && <p className="text-xs text-slate-400">HF ID: {weight.hfModelId}</p>}
+            {weight.installedAt && <p className="text-xs text-slate-500">Installed {formatDate(weight.installedAt)}</p>}
             <p className="text-xs text-slate-400">{weight.path}</p>
           </div>
           <div className="mt-4 w-full md:mt-0 md:w-64">

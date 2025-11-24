@@ -34,7 +34,7 @@ import (
 )
 
 const (
-	version         = "0.4.11-go"
+	version         = "0.4.14-go"
 	shutdownTimeout = 5 * time.Second
 )
 
@@ -285,7 +285,9 @@ func setupRouter(h *handlers.Handler, apiToken string) *gin.Engine {
 	protected.GET("/weights/install/status/:id", h.GetJob)
 	protected.GET("/jobs", h.ListJobs)
 	protected.GET("/jobs/:id", h.GetJob)
+	protected.DELETE("/jobs", h.DeleteJobs)
 	protected.GET("/history", h.ListHistory)
+	protected.DELETE("/history", h.ClearHistory)
 
 	return router
 }

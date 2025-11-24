@@ -63,6 +63,9 @@ export interface WeightInfo {
   sizeHuman: string;
   modifiedTime: string;
   fileCount: number;
+  hfModelId?: string;
+  revision?: string;
+  installedAt?: string;
 }
 
 export interface WeightStats {

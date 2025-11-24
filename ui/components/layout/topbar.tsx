@@ -1,4 +1,4 @@
-import { activateModelAction, deactivateModelAction } from '@/app/actions';
+import { activateModelAction, clearHistoryAction, clearJobsAction, deactivateModelAction } from '@/app/actions';
 import type { ActiveService, HistoryEntry, Job, Model } from '@/lib/types';
 import { formatDistanceToNow } from '@/lib/utils';
 import { Search } from 'lucide-react';
@@ -6,6 +6,8 @@ import { Search } from 'lucide-react';
 const DEFAULT_ACTION_STATE = { ok: false, message: '' };
 const ACTIVATE_ACTION = activateModelAction.bind(null, DEFAULT_ACTION_STATE);
 const DEACTIVATE_ACTION = deactivateModelAction.bind(null, DEFAULT_ACTION_STATE);
+const CLEAR_JOBS_ACTION = clearJobsAction.bind(null, DEFAULT_ACTION_STATE);
+const CLEAR_HISTORY_ACTION = clearHistoryAction.bind(null, DEFAULT_ACTION_STATE);
 
 interface Props {
   activeService: ActiveService | null;
@@ -55,6 +57,12 @@ export function TopBar({ activeService, models, jobs, history }: Props) {
           <a href="#jobs" className="text-xs font-semibold text-brand-400 underline-offset-2 hover:underline">
             View job center
           </a>
+          <form action={CLEAR_JOBS_ACTION} className="mt-2 flex items-center justify-between gap-2 text-xs text-slate-400">
+            <input type="hidden" name="status" value="completed" />
+            <button type="submit" className="rounded-md border border-white/10 px-2 py-1 font-semibold text-slate-200 hover:border-white/40">
+              Clear completed jobs
+            </button>
+          </form>
         </Popover>
 
         <Popover label="Recent activity" badge={latestEvents.length} panelClass="w-80">
@@ -69,6 +77,11 @@ export function TopBar({ activeService, models, jobs, history }: Props) {
           <a href="#history" className="text-xs font-semibold text-brand-400 underline-offset-2 hover:underline">
             View full timeline
           </a>
+          <form action={CLEAR_HISTORY_ACTION} className="mt-2 text-xs">
+            <button type="submit" className="rounded-md border border-white/10 px-2 py-1 font-semibold text-slate-200 hover:border-white/40">
+              Clear activity log
+            </button>
+          </form>
         </Popover>
 
         <ActiveModelMenu activeService={activeService} activeName={activeName} models={models} />

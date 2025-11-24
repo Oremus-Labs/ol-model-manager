@@ -123,6 +123,67 @@ func TestInstallWeightsDerivesFilesFromHuggingFace(t *testing.T) {
 	}
 }
 
+func openTestStore(t *testing.T) *store.Store {
+	t.Helper()
+	dir := t.TempDir()
+	s, err := store.Open(filepath.Join(dir, "state.db"), "sqlite")
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = s.Close()
+	})
+	return s
+}
+
+func TestDeleteJobsEndpoint(t *testing.T) {
+	t.Parallel()
+
+	stateStore := openTestStore(t)
+	handler := New(nil, nil, nil, nil, nil, nil, nil, stateStore, nil, Options{})
+
+	if err := stateStore.CreateJob(&store.Job{ID: "job-delete", Type: "weight_install"}); err != nil {
+		t.Fatalf("CreateJob: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodDelete, "/jobs?status=pending", nil)
+
+	handler.DeleteJobs(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200 got %d", w.Code)
+	}
+	if jobs, err := stateStore.ListJobs(10); err != nil || len(jobs) != 0 {
+		t.Fatalf("expected jobs cleared, got %+v err=%v", jobs, err)
+	}
+}
+
+func TestClearHistoryEndpoint(t *testing.T) {
+	t.Parallel()
+
+	stateStore := openTestStore(t)
+	handler := New(nil, nil, nil, nil, nil, nil, nil, stateStore, nil, Options{})
+
+	if err := stateStore.AppendHistory(&store.HistoryEntry{Event: "test"}); err != nil {
+		t.Fatalf("AppendHistory: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodDelete, "/history", nil)
+
+	handler.ClearHistory(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 got %d", w.Code)
+	}
+	if history, err := stateStore.ListHistory(10); err != nil || len(history) != 0 {
+		t.Fatalf("expected history cleared, got %+v err=%v", history, err)
+	}
+}
+
 func TestInstallWeightsRejectsInvalidHFID(t *testing.T) {
 	t.Parallel()
 

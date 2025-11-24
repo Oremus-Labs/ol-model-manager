@@ -111,3 +111,38 @@ func TestCatalogSnapshotRoundTrip(t *testing.T) {
 		t.Fatalf("expected unique models in snapshot")
 	}
 }
+
+func TestDeleteJobsAndHistory(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	s, err := Open(filepath.Join(dir, "state.db"), "sqlite")
+	if err != nil {
+		t.Fatalf("failed to open store: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = s.Close()
+	})
+
+	job := &Job{ID: "delete-me", Type: "weight_install", Status: JobDone}
+	if err := s.CreateJob(job); err != nil {
+		t.Fatalf("CreateJob: %v", err)
+	}
+	if err := s.AppendHistory(&HistoryEntry{Event: "test", ModelID: "foo"}); err != nil {
+		t.Fatalf("AppendHistory: %v", err)
+	}
+
+	if err := s.DeleteJobs(string(JobDone)); err != nil {
+		t.Fatalf("DeleteJobs: %v", err)
+	}
+	if jobs, err := s.ListJobs(10); err != nil || len(jobs) != 0 {
+		t.Fatalf("expected jobs to be purged, got %+v err=%v", jobs, err)
+	}
+
+	if err := s.ClearHistory(); err != nil {
+		t.Fatalf("ClearHistory: %v", err)
+	}
+	if history, err := s.ListHistory(10); err != nil || len(history) != 0 {
+		t.Fatalf("expected history to be cleared, got %+v err=%v", history, err)
+	}
+}

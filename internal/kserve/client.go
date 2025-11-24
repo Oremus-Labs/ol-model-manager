@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"path/filepath"
 	"strings"
 
 	"github.com/oremus-labs/ol-model-manager/internal/catalog"
@@ -327,63 +326,12 @@ func defaultString(value, defaultValue string) string {
 }
 
 func prepareEnvVars(env []catalog.EnvVar, storageURI, inferenceModelRoot string) []catalog.EnvVar {
-	if env == nil {
-		env = []catalog.EnvVar{}
-	} else {
-		copied := make([]catalog.EnvVar, len(env))
-		copy(copied, env)
-		env = copied
+	if len(env) == 0 {
+		return nil
 	}
-
-	localPath := deriveLocalModelPath(storageURI, inferenceModelRoot)
-	if localPath == "" {
-		if len(env) == 0 {
-			return nil
-		}
-		return env
-	}
-
-	found := false
-	for i, e := range env {
-		if e.Name != "MODEL_ID" {
-			continue
-		}
-		found = true
-		if strings.HasPrefix(e.Value, "/") {
-			break
-		}
-		env[i].ValueFrom = nil
-		env[i].Value = localPath
-		break
-	}
-
-	if !found {
-		env = append(env, catalog.EnvVar{
-			Name:  "MODEL_ID",
-			Value: localPath,
-		})
-	}
-
-	return env
-}
-
-func deriveLocalModelPath(storageURI, inferenceModelRoot string) string {
-	if inferenceModelRoot == "" {
-		return ""
-	}
-	const pvcPrefix = "pvc://"
-	if !strings.HasPrefix(storageURI, pvcPrefix) {
-		return ""
-	}
-
-	trimmed := strings.TrimPrefix(storageURI, pvcPrefix)
-	parts := strings.SplitN(trimmed, "/", 2)
-	if len(parts) < 2 || parts[1] == "" {
-		return inferenceModelRoot
-	}
-
-	subPath := strings.Trim(parts[1], "/")
-	return filepath.Join(inferenceModelRoot, subPath)
+	cloned := make([]catalog.EnvVar, len(env))
+	copy(cloned, env)
+	return cloned
 }
 
 func deepCopyMap(src map[string]interface{}) map[string]interface{} {

@@ -358,10 +358,10 @@ func (d *Discovery) buildCatalogModel(hfModel *HuggingFaceModel, req GenerateReq
 
 	model.Resources = &catalog.Resources{
 		Requests: map[string]string{
-			"nvidia.com/gpu": "1",
+			"amd.com/gpu": "1",
 		},
 		Limits: map[string]string{
-			"nvidia.com/gpu": "1",
+			"amd.com/gpu": "1",
 		},
 	}
 
