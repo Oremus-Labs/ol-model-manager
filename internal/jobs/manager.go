@@ -10,6 +10,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/oremus-labs/ol-model-manager/internal/events"
+	"github.com/oremus-labs/ol-model-manager/internal/logutil"
+	"github.com/oremus-labs/ol-model-manager/internal/metrics"
 	"github.com/oremus-labs/ol-model-manager/internal/store"
 	"github.com/oremus-labs/ol-model-manager/internal/weights"
 )
@@ -115,6 +117,11 @@ func (m *Manager) GetJob(id string) (*store.Job, error) {
 func (m *Manager) processJob(job *store.Job, req InstallRequest) {
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Hour)
 	defer cancel()
+	start := time.Now()
+	finalStatus := "failed"
+	defer func() {
+		metrics.ObserveJobCompletion(job.Type, finalStatus, time.Since(start))
+	}()
 
 	m.updateJob(job, store.JobRunning, 5, "queued", "Waiting for worker")
 	m.updateJob(job, store.JobRunning, 15, "preparing", "Preparing cache directory")
@@ -145,8 +152,14 @@ func (m *Manager) processJob(job *store.Job, req InstallRequest) {
 		m.appendHistory(job.ID, "weight_install_failed", req.ModelID, map[string]interface{}{
 			"error": err.Error(),
 		})
+		logutil.Error("weights_install_failed", err, map[string]interface{}{
+			"jobId":   job.ID,
+			"modelId": req.ModelID,
+			"target":  req.Target,
+		})
 		return
 	}
+	finalStatus = "success"
 
 	job.Error = ""
 	result := map[string]interface{}{
@@ -164,6 +177,12 @@ func (m *Manager) processJob(job *store.Job, req InstallRequest) {
 	m.updateJob(job, store.JobDone, 100, "completed", "Weights ready")
 
 	m.appendHistory(job.ID, "weight_install_completed", req.ModelID, job.Result)
+	logutil.Info("weights_install_completed", map[string]interface{}{
+		"jobId":    job.ID,
+		"modelId":  req.ModelID,
+		"target":   req.Target,
+		"duration": time.Since(start).String(),
+	})
 }
 
 func (m *Manager) updateJob(job *store.Job, status store.JobStatus, progress int, stage, message string) {

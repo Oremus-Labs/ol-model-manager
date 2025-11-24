@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/oremus-labs/ol-model-manager/internal/events"
+	"github.com/oremus-labs/ol-model-manager/internal/logutil"
+	"github.com/oremus-labs/ol-model-manager/internal/metrics"
 	"github.com/oremus-labs/ol-model-manager/internal/vllm"
 )
 
@@ -93,6 +95,10 @@ func (s *Service) refresh(ctx context.Context) error {
 	if s.discovery == nil || s.cache == nil {
 		return fmt.Errorf("sync service not configured")
 	}
+	started := time.Now().UTC()
+	s.emitEvent(ctx, "hf.refresh.started", map[string]interface{}{
+		"queryCount": len(s.queries),
+	})
 	seen := make(map[string]vllm.HuggingFaceModel)
 	for _, query := range s.queries {
 		results, err := s.discovery.SearchModels(query)
@@ -115,24 +121,55 @@ func (s *Service) refresh(ctx context.Context) error {
 		}
 	}
 	if len(seen) == 0 {
-		return fmt.Errorf("no models discovered during refresh")
+		err := fmt.Errorf("no models discovered during refresh")
+		s.emitEvent(ctx, "hf.refresh.failed", map[string]interface{}{
+			"error": err.Error(),
+		})
+		metrics.ObserveHFRefresh(time.Since(started), 0, false)
+		logutil.Error("hf_refresh_failed", err, map[string]interface{}{
+			"queryCount": len(s.queries),
+		})
+		return err
 	}
 	models := make([]vllm.HuggingFaceModel, 0, len(seen))
 	for _, model := range seen {
 		models = append(models, model)
 	}
 	if err := s.cache.Save(ctx, models); err != nil {
+		s.emitEvent(ctx, "hf.refresh.failed", map[string]interface{}{
+			"error": err.Error(),
+		})
+		metrics.ObserveHFRefresh(time.Since(started), len(models), false)
+		logutil.Error("hf_refresh_failed", err, map[string]interface{}{
+			"count": len(models),
+		})
 		return err
 	}
-	if s.events != nil {
-		_ = s.events.Publish(ctx, events.Event{
-			Type:      "hf.refresh.completed",
-			Timestamp: time.Now().UTC(),
-			Data: map[string]interface{}{
-				"count": len(models),
-			},
-		})
-	}
+	s.emitEvent(ctx, "hf.refresh.completed", map[string]interface{}{
+		"count":    len(models),
+		"duration": time.Since(started).String(),
+	})
+	metrics.ObserveHFRefresh(time.Since(started), len(models), true)
 	s.logger.Printf("refreshed %d Hugging Face models", len(models))
+	logutil.Info("hf_refresh_completed", map[string]interface{}{
+		"count":    len(models),
+		"duration": time.Since(started).String(),
+	})
 	return nil
+}
+
+func (s *Service) emitEvent(ctx context.Context, eventType string, data map[string]interface{}) {
+	if s.events == nil || eventType == "" {
+		return
+	}
+	if data == nil {
+		data = map[string]interface{}{}
+	}
+	if err := s.events.Publish(ctx, events.Event{
+		Type:      eventType,
+		Timestamp: time.Now().UTC(),
+		Data:      data,
+	}); err != nil {
+		s.logger.Printf("sync service: failed to publish %s event: %v", eventType, err)
+	}
 }

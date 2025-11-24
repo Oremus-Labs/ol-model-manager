@@ -21,6 +21,7 @@ HTTP API service for dynamically managing KServe InferenceServices based on mode
 - Validate catalog entries against the shared schema, PVC/secret availability, and GPU capacity
 - Dry-run KServe activations (and optional readiness probes) before flipping production traffic
 - Estimate GPU compatibility + runtime recommendations per catalog entry, with GPU profile metadata exposed to the UI
+- Query the same data via a GraphQL endpoint (`/graphql`) for UI dashboards or automation clients
 
 ## Environment Variables
 
@@ -73,6 +74,7 @@ HTTP API service for dynamically managing KServe InferenceServices based on mode
 - `POST /vllm/model-info` - Describe a Hugging Face model (metadata, compatibility, suggested catalog entry)
 - `GET /huggingface/search` - Proxy Hugging Face search for vLLM-friendly results
 - `GET /huggingface/models/{id}` - Fetch Hugging Face metadata + compatibility info (GET variant of `/vllm/model-info`)
+- `GET|POST /graphql` - GraphQL endpoint exposing models, jobs, runtime status, and cached Hugging Face metadata
 - `GET /recommendations/{gpuType}` - Suggested vLLM flags/notes for the GPU profile
 - `GET /recommendations/profiles` - List known GPU profiles (useful for UI dropdowns)
 - `GET /weights` - List all installed weight directories

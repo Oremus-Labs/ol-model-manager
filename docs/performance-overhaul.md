@@ -60,6 +60,9 @@ Verify: kubectl logs deploy/model-manager-worker, run curl -X POST /weights/inst
 - `GET /jobs/9fb94e3d-478d-48fd-abcc-90e7038cdb3b` reported `status=completed` and `progress=100` after Redis processed the queue entry (size ≈4.5 MiB).
 - `curl -N https://model-manager-api.oremuslabs.app/events` now seeds immediate `job.completed` SSE payloads without polling, so the UI can reflect progress live.
 - Follow-up fix: SSE frames now carry the job ID in the SSE `id` header, preserve the datastore timestamp, and bracket the replay backlog with `stream.seed.start/complete` markers so clients can distinguish history from live updates.
+- Helm chart now provisions a dedicated Redis deployment + PVC (`model-manager-redis`) managed by the Longhorn storage class for automatic scheduling on the cluster; api/worker/sync default their `REDIS_ADDR` to the in-cluster service unless overridden, so the worker stream consumer no longer falls back to heartbeat mode and there is no per-node host-path prep required.
+- Verified rollout via `argocd app sync workloads-ai-model-manager`; the new `model-manager-redis` Deployment and PVC (`longhorn` storage class) reported Healthy/Bound, and `kubectl logs deploy/model-manager-worker` now shows `worker connected to Redis queue; waiting for jobs`.
+- Triggered `POST /weights/install` for `sshleifer/tiny-gpt2` (target `sshleifer-tiny-gpt2-redis-test`) using the public API; job `b05eec49-7f45-4ef7-b0ff-b5269eb17cdf` moved to `status=completed`, the weights landed under `/mnt/models/sshleifer-tiny-gpt2-redis-test`, and the SSE stream emitted the corresponding `job.completed` event.
 
 Phase 2 – Hugging Face cache + background sync
 Background sync service (cmd/sync)
@@ -99,13 +102,16 @@ Verify: kubectl logs deploy/model-manager-api | grep informer, ensure events fir
 
 **Verification – 2025-11-24**
 - Added `internal/status.Manager` which watches the active InferenceService + labeled Deployments/Pods and emits `model.status.updated` SSE events whenever readiness changes.
-- New `/models/status` endpoint serves the cached snapshot instantly; `curl https://model-manager-api.oremuslabs.app/models/status` now reports the ISVC URL, deployment replica counts, and pod readiness.
-- `kubectl logs deploy/model-manager-sync` and `deploy/model-manager-api` show the informers starting up, and `timeout 5s curl -Ns …/events` includes live `model.status.updated` payloads when pods cycle.
+- `/models/status` now returns enriched data (deployment conditions, per-pod reasons/messages, container state, GPU request/limit maps, and aggregated GPU allocations) so the UI can render detailed health cards without extra API calls.
+- SSE stream carries `model.activation.started/completed/failed`, `model.deactivation.*`, `hf.refresh.started/completed/failed`, and `model.status.updated` payloads—verified via `timeout 5s curl -Ns …/events`, which now shows the richer event types alongside historical job completions.
+- `kubectl logs deploy/model-manager-sync` and `deploy/model-manager-api` show the informers starting up, and `curl https://model-manager-api.oremuslabs.app/models/status` reflects the live GPU totals and pod-level telemetry after scaling the InferenceService.
 Phase 4 – UI/client integration hooks
 REST+WS contract
 
-Document event payloads, job fields, HF records.
-Provide /events sample.
+- Added `docs/events.md` documenting every SSE payload (`job.*`, `model.activation.*`, `model.status.updated`, `hf.refresh.*`) plus curl examples and references to `/jobs` + `/models/status`.
+- `/events` sampling verified via `timeout 10s curl -Ns …/events` which now surfaces `model.activation.started/completed` frames (job `qwen2.5-0.5b-instruct` tested at 2025‑11‑24T22:30Z).
+- GraphQL endpoint exposed at `/graphql` (powered by `github.com/graphql-go/graphql`) covers models, jobs, runtime status, and Hugging Face cache queries; documented in `docs/events.md` and validated via `curl -X POST …/graphql -d '{"query":"{ models { id } jobs(limit:1) { id status } }"}'`.
+
 Optional GraphQL layer
 
 If we go GraphQL, add cmd/api resolvers for queries/subscriptions (gqlgen). But can skip if REST+WS suffices.

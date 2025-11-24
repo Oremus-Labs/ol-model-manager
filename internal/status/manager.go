@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
@@ -26,6 +28,7 @@ type RuntimeStatus struct {
 	InferenceService *InferenceServiceStatus `json:"inferenceService,omitempty"`
 	Deployments      []DeploymentStatus      `json:"deployments,omitempty"`
 	Pods             []PodStatus             `json:"pods,omitempty"`
+	GPUAllocations   map[string]string       `json:"gpuAllocations,omitempty"`
 	UpdatedAt        time.Time               `json:"updatedAt"`
 }
 
@@ -48,23 +51,45 @@ type Condition struct {
 
 // DeploymentStatus describes a deployment.
 type DeploymentStatus struct {
-	Name              string `json:"name"`
-	ReadyReplicas     int32  `json:"readyReplicas"`
-	AvailableReplicas int32  `json:"availableReplicas"`
-	Replicas          int32  `json:"replicas"`
-	UpdatedReplicas   int32  `json:"updatedReplicas"`
+	Name                string      `json:"name"`
+	ReadyReplicas       int32       `json:"readyReplicas"`
+	AvailableReplicas   int32       `json:"availableReplicas"`
+	Replicas            int32       `json:"replicas"`
+	UpdatedReplicas     int32       `json:"updatedReplicas"`
+	ObservedGeneration  int64       `json:"observedGeneration,omitempty"`
+	Conditions          []Condition `json:"conditions,omitempty"`
+	LastUpdateTimestamp time.Time   `json:"lastUpdateTimestamp,omitempty"`
 }
 
 // PodStatus captures pod details.
 type PodStatus struct {
-	Name            string `json:"name"`
-	Phase           string `json:"phase"`
-	ReadyContainers int32  `json:"readyContainers"`
-	TotalContainers int32  `json:"totalContainers"`
-	Restarts        int32  `json:"restarts"`
-	HostIP          string `json:"hostIP,omitempty"`
-	PodIP           string `json:"podIP,omitempty"`
-	NodeName        string `json:"nodeName,omitempty"`
+	Name            string                   `json:"name"`
+	Phase           string                   `json:"phase"`
+	ReadyContainers int32                    `json:"readyContainers"`
+	TotalContainers int32                    `json:"totalContainers"`
+	Restarts        int32                    `json:"restarts"`
+	HostIP          string                   `json:"hostIP,omitempty"`
+	PodIP           string                   `json:"podIP,omitempty"`
+	NodeName        string                   `json:"nodeName,omitempty"`
+	Reason          string                   `json:"reason,omitempty"`
+	Message         string                   `json:"message,omitempty"`
+	StartTime       *time.Time               `json:"startTime,omitempty"`
+	Conditions      []Condition              `json:"conditions,omitempty"`
+	Containers      []ContainerStatusSummary `json:"containers,omitempty"`
+	GPURequests     map[string]string        `json:"gpuRequests,omitempty"`
+	GPULimits       map[string]string        `json:"gpuLimits,omitempty"`
+}
+
+// ContainerStatusSummary details container state.
+type ContainerStatusSummary struct {
+	Name         string     `json:"name"`
+	Ready        bool       `json:"ready"`
+	RestartCount int32      `json:"restartCount"`
+	State        string     `json:"state,omitempty"`
+	Reason       string     `json:"reason,omitempty"`
+	Message      string     `json:"message,omitempty"`
+	StartedAt    *time.Time `json:"startedAt,omitempty"`
+	FinishedAt   *time.Time `json:"finishedAt,omitempty"`
 }
 
 // Provider exposes runtime status snapshots.
@@ -231,15 +256,20 @@ func (m *Manager) onDeployment(obj interface{}) {
 	if dep.Labels["serving.kserve.io/inferenceservice"] != m.isvcName {
 		return
 	}
+	conds := convertDeploymentConditions(dep.Status.Conditions)
+	now := time.Now().UTC()
 	m.mu.Lock()
 	m.deployments[dep.Name] = DeploymentStatus{
-		Name:              dep.Name,
-		ReadyReplicas:     dep.Status.ReadyReplicas,
-		AvailableReplicas: dep.Status.AvailableReplicas,
-		Replicas:          dep.Status.Replicas,
-		UpdatedReplicas:   dep.Status.UpdatedReplicas,
+		Name:                dep.Name,
+		ReadyReplicas:       dep.Status.ReadyReplicas,
+		AvailableReplicas:   dep.Status.AvailableReplicas,
+		Replicas:            dep.Status.Replicas,
+		UpdatedReplicas:     dep.Status.UpdatedReplicas,
+		ObservedGeneration:  dep.Status.ObservedGeneration,
+		Conditions:          conds,
+		LastUpdateTimestamp: now,
 	}
-	m.lastUpdate = time.Now().UTC()
+	m.lastUpdate = now
 	snapshot := m.snapshotLocked()
 	m.mu.Unlock()
 	m.publish(snapshot)
@@ -281,6 +311,15 @@ func (m *Manager) onPod(obj interface{}) {
 		}
 		restarts += cs.RestartCount
 	}
+	var startTime *time.Time
+	if pod.Status.StartTime != nil {
+		t := pod.Status.StartTime.Time
+		startTime = &t
+	}
+	reqs, limits := gpuResourcesForPod(pod)
+	conditions := convertPodConditions(pod.Status.Conditions)
+	containers := summarizeContainers(pod.Status.ContainerStatuses)
+	now := time.Now().UTC()
 	m.mu.Lock()
 	m.pods[pod.Name] = PodStatus{
 		Name:            pod.Name,
@@ -291,8 +330,15 @@ func (m *Manager) onPod(obj interface{}) {
 		HostIP:          pod.Status.HostIP,
 		PodIP:           pod.Status.PodIP,
 		NodeName:        pod.Spec.NodeName,
+		Reason:          pod.Status.Reason,
+		Message:         pod.Status.Message,
+		StartTime:       startTime,
+		Conditions:      conditions,
+		Containers:      containers,
+		GPURequests:     reqs,
+		GPULimits:       limits,
 	}
-	m.lastUpdate = time.Now().UTC()
+	m.lastUpdate = now
 	snapshot := m.snapshotLocked()
 	m.mu.Unlock()
 	m.publish(snapshot)
@@ -332,12 +378,166 @@ func (m *Manager) snapshotLocked() RuntimeStatus {
 	}
 	if len(m.pods) > 0 {
 		pods := make([]PodStatus, 0, len(m.pods))
+		gpuTotals := make(map[string]resource.Quantity)
 		for _, p := range m.pods {
 			pods = append(pods, p)
+			sumQuantityStrings(gpuTotals, p.GPURequests)
 		}
 		status.Pods = pods
+		if len(gpuTotals) > 0 {
+			status.GPUAllocations = quantitiesToStringMap(gpuTotals)
+		}
 	}
 	return status
+}
+
+func convertDeploymentConditions(conds []appsv1.DeploymentCondition) []Condition {
+	if len(conds) == 0 {
+		return nil
+	}
+	out := make([]Condition, 0, len(conds))
+	for _, c := range conds {
+		cond := Condition{
+			Type:    string(c.Type),
+			Status:  string(c.Status),
+			Reason:  c.Reason,
+			Message: c.Message,
+		}
+		if !c.LastUpdateTime.IsZero() {
+			cond.LastTransitionTime = c.LastUpdateTime.Time
+		}
+		out = append(out, cond)
+	}
+	return out
+}
+
+func convertPodConditions(conds []corev1.PodCondition) []Condition {
+	if len(conds) == 0 {
+		return nil
+	}
+	out := make([]Condition, 0, len(conds))
+	for _, c := range conds {
+		cond := Condition{
+			Type:    string(c.Type),
+			Status:  string(c.Status),
+			Reason:  c.Reason,
+			Message: c.Message,
+		}
+		if !c.LastTransitionTime.IsZero() {
+			cond.LastTransitionTime = c.LastTransitionTime.Time
+		}
+		out = append(out, cond)
+	}
+	return out
+}
+
+func summarizeContainers(statuses []corev1.ContainerStatus) []ContainerStatusSummary {
+	if len(statuses) == 0 {
+		return nil
+	}
+	out := make([]ContainerStatusSummary, 0, len(statuses))
+	for _, cs := range statuses {
+		summary := ContainerStatusSummary{
+			Name:         cs.Name,
+			Ready:        cs.Ready,
+			RestartCount: cs.RestartCount,
+		}
+		if cs.State.Running != nil {
+			summary.State = "Running"
+			if !cs.State.Running.StartedAt.IsZero() {
+				start := cs.State.Running.StartedAt.Time
+				summary.StartedAt = &start
+			}
+		} else if cs.State.Waiting != nil {
+			summary.State = "Waiting"
+			summary.Reason = cs.State.Waiting.Reason
+			summary.Message = cs.State.Waiting.Message
+		} else if cs.State.Terminated != nil {
+			summary.State = "Terminated"
+			summary.Reason = cs.State.Terminated.Reason
+			summary.Message = cs.State.Terminated.Message
+			if !cs.State.Terminated.StartedAt.IsZero() {
+				start := cs.State.Terminated.StartedAt.Time
+				summary.StartedAt = &start
+			}
+			if !cs.State.Terminated.FinishedAt.IsZero() {
+				end := cs.State.Terminated.FinishedAt.Time
+				summary.FinishedAt = &end
+			}
+		}
+		if cs.LastTerminationState.Terminated != nil && summary.Reason == "" {
+			summary.Reason = cs.LastTerminationState.Terminated.Reason
+			summary.Message = cs.LastTerminationState.Terminated.Message
+		}
+		out = append(out, summary)
+	}
+	return out
+}
+
+func gpuResourcesForPod(pod *corev1.Pod) (map[string]string, map[string]string) {
+	requests := make(map[string]resource.Quantity)
+	limits := make(map[string]resource.Quantity)
+	addFrom := func(containers []corev1.Container) {
+		for _, ctr := range containers {
+			addResourceList(requests, ctr.Resources.Requests)
+			addResourceList(limits, ctr.Resources.Limits)
+		}
+	}
+	addFrom(pod.Spec.Containers)
+	addFrom(pod.Spec.InitContainers)
+	var reqs, lims map[string]string
+	if len(requests) > 0 {
+		reqs = quantitiesToStringMap(requests)
+	}
+	if len(limits) > 0 {
+		lims = quantitiesToStringMap(limits)
+	}
+	return reqs, lims
+}
+
+func addResourceList(dest map[string]resource.Quantity, list corev1.ResourceList) {
+	for name, qty := range list {
+		resourceName := string(name)
+		if !isGPUResource(resourceName) {
+			continue
+		}
+		if existing, ok := dest[resourceName]; ok {
+			existing.Add(qty)
+			dest[resourceName] = existing
+		} else {
+			dest[resourceName] = qty.DeepCopy()
+		}
+	}
+}
+
+func isGPUResource(name string) bool {
+	return strings.Contains(strings.ToLower(name), "gpu")
+}
+
+func quantitiesToStringMap(src map[string]resource.Quantity) map[string]string {
+	out := make(map[string]string, len(src))
+	for name, qty := range src {
+		out[name] = qty.String()
+	}
+	return out
+}
+
+func sumQuantityStrings(dest map[string]resource.Quantity, values map[string]string) {
+	if dest == nil || len(values) == 0 {
+		return
+	}
+	for name, val := range values {
+		qty, err := resource.ParseQuantity(val)
+		if err != nil {
+			continue
+		}
+		if existing, ok := dest[name]; ok {
+			existing.Add(qty)
+			dest[name] = existing
+		} else {
+			dest[name] = qty
+		}
+	}
 }
 
 func (m *Manager) publish(status RuntimeStatus) {

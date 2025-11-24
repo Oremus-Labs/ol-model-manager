@@ -11,7 +11,8 @@ import (
 
 // Options configures the HTTP server wiring.
 type Options struct {
-	APIToken string
+	APIToken       string
+	GraphQLHandler http.Handler
 }
 
 // Server wraps the Gin engine and associated configuration.
@@ -53,6 +54,11 @@ func NewServer(handler *handlers.Handler, opts Options) *Server {
 	// HuggingFace discovery
 	engine.GET("/huggingface/search", handler.SearchHuggingFace)
 	engine.GET("/huggingface/models/*id", handler.GetHuggingFaceModel)
+
+	if opts.GraphQLHandler != nil {
+		engine.GET("/graphql", gin.WrapH(opts.GraphQLHandler))
+		engine.POST("/graphql", gin.WrapH(opts.GraphQLHandler))
+	}
 
 	// vLLM discovery
 	engine.GET("/vllm/supported-models", handler.ListVLLMArchitectures)

@@ -490,10 +490,26 @@ func (h *Handler) ActivateModel(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "model not found"})
 		return
 	}
+	meta := gin.H{
+		"modelId":     req.ID,
+		"displayName": modelDisplayName(model),
+		"storageUri":  model.StorageURI,
+		"runtime":     model.Runtime,
+		"hfModelId":   model.HFModelID,
+		"requestedBy": c.GetString("subject"),
+		"requestedAt": time.Now().UTC(),
+	}
+	h.publishEvent("model.activation.started", meta)
 
 	result, err := h.kserve.Activate(model)
 	if err != nil {
 		log.Printf("Failed to activate model %s: %v", req.ID, err)
+		failMeta := gin.H{
+			"modelId":     req.ID,
+			"displayName": modelDisplayName(model),
+			"error":       err.Error(),
+		}
+		h.publishEvent("model.activation.failed", failMeta)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -506,18 +522,30 @@ func (h *Handler) ActivateModel(c *gin.Context) {
 		"inferenceservice": result,
 	})
 
-	h.recordHistory("model_activated", req.ID, map[string]interface{}{
-		"action": result.Action,
-	})
+	successMeta := map[string]interface{}{
+		"action":      result.Action,
+		"modelId":     req.ID,
+		"displayName": modelDisplayName(model),
+	}
+	h.recordHistory("model_activated", req.ID, successMeta)
+	h.publishEvent("model.activation.completed", successMeta)
 }
 
 // DeactivateModel deactivates the active model.
 func (h *Handler) DeactivateModel(c *gin.Context) {
 	log.Println("Deactivating active model")
 
+	h.publishEvent("model.deactivation.started", gin.H{
+		"requestedBy": c.GetString("subject"),
+		"requestedAt": time.Now().UTC(),
+	})
+
 	result, err := h.kserve.Deactivate()
 	if err != nil {
 		log.Printf("Failed to deactivate model: %v", err)
+		h.publishEvent("model.deactivation.failed", gin.H{
+			"error": err.Error(),
+		})
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -530,6 +558,9 @@ func (h *Handler) DeactivateModel(c *gin.Context) {
 	})
 
 	h.recordHistory("model_deactivated", "", map[string]interface{}{
+		"action": result.Action,
+	})
+	h.publishEvent("model.deactivation.completed", gin.H{
 		"action": result.Action,
 	})
 }
@@ -1463,6 +1494,21 @@ func (h *Handler) recordHistory(event, modelID string, meta map[string]interface
 	}
 	if err := h.store.AppendHistory(entry); err != nil {
 		log.Printf("Failed to append history: %v", err)
+	}
+}
+
+func (h *Handler) publishEvent(eventType string, payload interface{}) {
+	if h.events == nil || eventType == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := h.events.Publish(ctx, events.Event{
+		Type:      eventType,
+		Timestamp: time.Now().UTC(),
+		Data:      payload,
+	}); err != nil {
+		log.Printf("Failed to publish event %s: %v", eventType, err)
 	}
 }
 

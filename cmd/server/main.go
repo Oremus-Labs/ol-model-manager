@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -15,6 +16,7 @@ import (
 	"github.com/oremus-labs/ol-model-manager/internal/catalog"
 	"github.com/oremus-labs/ol-model-manager/internal/catalogwriter"
 	"github.com/oremus-labs/ol-model-manager/internal/events"
+	"github.com/oremus-labs/ol-model-manager/internal/graphqlapi"
 	"github.com/oremus-labs/ol-model-manager/internal/handlers"
 	"github.com/oremus-labs/ol-model-manager/internal/hfcache"
 	"github.com/oremus-labs/ol-model-manager/internal/jobs"
@@ -241,7 +243,23 @@ func main() {
 	startWeightMonitor(rootCtx, weightManager)
 
 	// Setup HTTP server
-	server := api.NewServer(h, api.Options{APIToken: cfg.APIToken})
+	var gqlHandler http.Handler
+	if graphqlHandler, err := graphqlapi.NewHandler(graphqlapi.Config{
+		Catalog:   cat,
+		Store:     stateStore,
+		Runtime:   runtimeStatus,
+		HFCache:   stateStore,
+		Discovery: vllmDiscovery,
+	}); err != nil {
+		log.Printf("GraphQL handler disabled: %v", err)
+	} else {
+		gqlHandler = graphqlHandler
+	}
+
+	server := api.NewServer(h, api.Options{
+		APIToken:       cfg.APIToken,
+		GraphQLHandler: gqlHandler,
+	})
 	srv := server.Start(":" + cfg.ServerPort)
 	log.Printf("Server listening on :%s", cfg.ServerPort)
 
