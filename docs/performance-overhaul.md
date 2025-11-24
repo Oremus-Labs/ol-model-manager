@@ -79,6 +79,12 @@ Build/push new sync image (docker build -f Dockerfile.sync ...).
 Helm chart: add Deployment model-manager-sync.
 Commit/push code & chart, sync via Argo.
 Verify via logs (kubectl logs deploy/model-manager-sync) and API hitting /huggingface/search.
+
+**Verification – 2025-11-24**
+- Introduced `internal/hfcache` + datastore schema so Hugging Face snapshots persist to SQLite/Redis.
+- `cmd/sync` now mounts the `model-manager-state` PVC, consumes Redis/events, and on startup refreshes the top text-generation models (GitOps tag `ghcr.io/oremus-labs/ol-model-manager:0.5.6-go`).
+- `kubectl logs deploy/model-manager-sync -n ai | tail` shows `refreshed 7 Hugging Face models`; SSE emits `hf.refresh.completed` with the cached count.
+- `/huggingface/search?q=Qwen` now returns the cached models instantly (see curl response captured during verification) and falls back to live discovery only when `compatibleOnly=true`.
 Phase 3 – Kubernetes informers & live status
 Informer module
 
