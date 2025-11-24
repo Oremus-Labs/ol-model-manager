@@ -220,11 +220,17 @@ func (m *Manager) emitJobEvent(job *store.Job) {
 		return
 	}
 	payload := *job
+	timestamp := job.UpdatedAt
+	if timestamp.IsZero() {
+		timestamp = time.Now().UTC()
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	if err := m.events.Publish(ctx, events.Event{
-		Type: fmt.Sprintf("job.%s", job.Status),
-		Data: payload,
+		ID:        job.ID,
+		Type:      fmt.Sprintf("job.%s", job.Status),
+		Timestamp: timestamp,
+		Data:      payload,
 	}); err != nil {
 		log.Printf("jobs: failed to publish event for job %s: %v", job.ID, err)
 	}

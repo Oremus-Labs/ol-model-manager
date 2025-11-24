@@ -59,6 +59,7 @@ Verify: kubectl logs deploy/model-manager-worker, run curl -X POST /weights/inst
 - Exercised `POST /weights/install` with `hfModelId=sshleifer/tiny-gpt2`; response returned job `9fb94e3d-478d-48fd-abcc-90e7038cdb3b` and `storageUri=pvc://venus-model-storage/sshleifer/tiny-gpt2`.
 - `GET /jobs/9fb94e3d-478d-48fd-abcc-90e7038cdb3b` reported `status=completed` and `progress=100` after Redis processed the queue entry (size ≈4.5 MiB).
 - `curl -N https://model-manager-api.oremuslabs.app/events` now seeds immediate `job.completed` SSE payloads without polling, so the UI can reflect progress live.
+- Follow-up fix: SSE frames now carry the job ID in the SSE `id` header, preserve the datastore timestamp, and bracket the replay backlog with `stream.seed.start/complete` markers so clients can distinguish history from live updates.
 
 Phase 2 – Hugging Face cache + background sync
 Background sync service (cmd/sync)

@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gin-contrib/sse"
 	"github.com/gin-gonic/gin"
 	"github.com/oremus-labs/ol-model-manager/internal/catalog"
 	"github.com/oremus-labs/ol-model-manager/internal/catalogwriter"
@@ -248,15 +249,37 @@ func (h *Handler) StreamEvents(c *gin.Context) {
 	c.Writer.Header().Set("Cache-Control", "no-cache")
 	c.Writer.Header().Set("Connection", "keep-alive")
 
-	out := make(chan events.Event, 16)
+	out := make(chan events.Event, 32)
 
 	if h.store != nil {
-		if jobs, err := h.store.ListJobs(5); err == nil {
-			for _, job := range jobs {
-				out <- events.Event{
-					Type: fmt.Sprintf("job.%s", job.Status),
-					Data: job,
+		if jobs, err := h.store.ListJobs(5); err == nil && len(jobs) > 0 {
+			seedID := fmt.Sprintf("seed-%d", time.Now().UnixNano())
+			meta := gin.H{"count": len(jobs)}
+			now := time.Now().UTC()
+			out <- events.Event{
+				ID:        seedID,
+				Type:      "stream.seed.start",
+				Timestamp: now,
+				Data:      meta,
+			}
+			for i := len(jobs) - 1; i >= 0; i-- {
+				job := jobs[i]
+				evtTime := job.UpdatedAt
+				if evtTime.IsZero() {
+					evtTime = job.CreatedAt
 				}
+				out <- events.Event{
+					ID:        job.ID,
+					Type:      fmt.Sprintf("job.%s", job.Status),
+					Timestamp: evtTime,
+					Data:      job,
+				}
+			}
+			out <- events.Event{
+				ID:        seedID + ".complete",
+				Type:      "stream.seed.complete",
+				Timestamp: time.Now().UTC(),
+				Data:      meta,
 			}
 		}
 	}
@@ -285,7 +308,11 @@ func (h *Handler) StreamEvents(c *gin.Context) {
 			if !ok {
 				return false
 			}
-			c.SSEvent(evt.Type, evt)
+			c.Render(-1, sse.Event{
+				Id:    evt.ID,
+				Event: evt.Type,
+				Data:  evt,
+			})
 			return true
 		case <-ctx.Done():
 			return false
