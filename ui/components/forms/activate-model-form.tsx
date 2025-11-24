@@ -15,15 +15,6 @@ export function ActivateModelForm({ modelId }: ActivateModelFormProps) {
   return (
     <form action={formAction} className="space-y-2 rounded-md border border-slate-800/60 bg-slate-900/40 p-4">
       <input type="hidden" name="id" value={modelId} />
-      <label className="flex flex-col text-xs uppercase tracking-wide text-slate-400">
-        API Token
-        <input
-          name="token"
-          type="password"
-          required
-          className="mt-1 rounded-md border border-slate-700 bg-slate-950/60 px-3 py-2 text-sm focus:border-brand-500 focus:outline-none"
-        />
-      </label>
       <SubmitButton idleLabel="Activate model" pendingLabel="Activating…" />
       {state.message && (
         <p className={`text-xs ${state.ok ? 'text-emerald-300' : 'text-rose-300'}`}>{state.message}</p>

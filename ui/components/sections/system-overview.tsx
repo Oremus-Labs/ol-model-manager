@@ -22,7 +22,7 @@ export function SystemOverview({ data }: Props) {
       <StatCard label="Version" value={data.version ?? 'n/a'} />
       <StatCard
         label="Models in catalog"
-        value={String(data.catalog?.count ?? 0)}
+        value={`${String(data.catalog?.count ?? 0)}${data.catalog?.status ? ` (${data.catalog?.status})` : ''}`}
       />
       <StatCard
         label="Cached weights"

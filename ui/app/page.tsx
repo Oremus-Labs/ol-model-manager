@@ -6,10 +6,10 @@ import { ModelsPanel } from '@/components/sections/models-panel';
 import { WeightsPanel } from '@/components/sections/weights-panel';
 import { JobsPanel } from '@/components/sections/jobs-panel';
 import { HistoryPanel } from '@/components/sections/history-panel';
-import { VLLMLibrary } from '@/components/sections/vllm-library';
 import { QuickActions } from '@/components/sections/quick-actions';
 import { HuggingFaceSearch } from '@/components/sections/hf-search';
-import { getArchitectures, getHistory, getJobs, getModels, getSystemInfo, getWeights, searchHuggingFace } from '@/lib/api';
+import { TopBar } from '@/components/layout/topbar';
+import { getActiveService, getHistory, getJobs, getModels, getSystemInfo, getWeights, searchHuggingFace } from '@/lib/api';
 
 export const dynamic = 'force-dynamic';
 
@@ -17,29 +17,20 @@ type PageProps = {
   searchParams?: Record<string, string | string[] | undefined>;
 };
 
-const isTruthy = (value: string | string[] | undefined): boolean => {
-  if (!value) return false;
-  const raw = Array.isArray(value) ? value[0] : value;
-  if (!raw) return false;
-  const normalized = raw.toLowerCase();
-  return normalized === '1' || normalized === 'true' || normalized === 'yes' || normalized === 'on';
-};
-
 export default async function Page({ searchParams }: PageProps) {
   const queryParam = typeof searchParams?.q === 'string' ? searchParams.q : '';
-  const compatibleOnly = isTruthy(searchParams?.compatibleOnly ?? searchParams?.compatible);
 
   const searchPromise = queryParam
-    ? searchHuggingFace({ query: queryParam, compatibleOnly })
+    ? searchHuggingFace({ query: queryParam })
     : Promise.resolve<ModelInsight[] | null>(null);
 
-  const [systemInfo, models, weights, jobs, history, architectures, searchResults] = await Promise.all([
+  const [systemInfo, models, weights, jobs, history, activeService, searchResults] = await Promise.all([
     getSystemInfo(),
     getModels(),
     getWeights(),
     getJobs(8),
     getHistory(8),
-    getArchitectures(),
+    getActiveService(),
     searchPromise,
   ]);
 
@@ -52,6 +43,8 @@ export default async function Page({ searchParams }: PageProps) {
           Observe, pre-stage, and activate large language models on the Venus GPU fleet with zero guesswork.
         </p>
       </section>
+
+      <TopBar activeService={activeService} models={models} jobs={jobs} history={history} />
 
       <QuickActions />
 
@@ -67,12 +60,8 @@ export default async function Page({ searchParams }: PageProps) {
         <InstallWeightsForm />
       </Section>
 
-      <Section
-        title="Hugging Face search"
-        description="Find compatible repos and inspect metadata before staging weights"
-        id="discover"
-      >
-        <HuggingFaceSearch query={queryParam} compatibleOnly={compatibleOnly} results={searchResults} />
+      <Section title="Hugging Face search" description="Find repos and inspect metadata before staging weights" id="discover">
+        <HuggingFaceSearch query={queryParam} results={searchResults} />
       </Section>
 
       <Section title="Catalog entries" description="Generated from the Git-synced model catalog" id="catalog">
@@ -91,9 +80,6 @@ export default async function Page({ searchParams }: PageProps) {
         <HistoryPanel events={history} />
       </Section>
 
-      <Section title="vLLM coverage" description="Architectures scraped from upstream GitHub">
-        <VLLMLibrary items={architectures} />
-      </Section>
     </div>
   );
 }

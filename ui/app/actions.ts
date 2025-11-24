@@ -8,15 +8,17 @@ type ActionState = {
   message: string;
 };
 
-async function authorizedFetch(path: string, token: string, init?: RequestInit) {
-  if (!token) {
-    throw new Error('API token is required');
+const API_TOKEN = process.env.MODEL_MANAGER_API_TOKEN ?? '';
+
+async function authorizedFetch(path: string, init?: RequestInit) {
+  if (!API_TOKEN) {
+    throw new Error('MODEL_MANAGER_API_TOKEN env var is not configured');
   }
   const res = await fetch(`${API_BASE_URL}${path}`, {
     ...init,
     headers: {
       'Content-Type': 'application/json',
-      Authorization: `Bearer ${token}`,
+      Authorization: `Bearer ${API_TOKEN}`,
       ...(init?.headers || {}),
     },
   });
@@ -30,7 +32,6 @@ async function authorizedFetch(path: string, token: string, init?: RequestInit) 
 
 export async function installWeightsAction(_: ActionState, formData: FormData): Promise<ActionState> {
   try {
-    const token = formData.get('token')?.toString().trim() || '';
     const hfModelId = formData.get('hfModelId')?.toString().trim();
     if (!hfModelId) {
       return { ok: false, message: 'Hugging Face model ID is required' };
@@ -41,7 +42,7 @@ export async function installWeightsAction(_: ActionState, formData: FormData): 
       target: formData.get('target')?.toString().trim() || undefined,
       overwrite: formData.get('overwrite') === 'on',
     };
-    const response = await authorizedFetch('/weights/install', token, {
+    const response = await authorizedFetch('/weights/install', {
       method: 'POST',
       body: JSON.stringify(payload),
     });
@@ -57,12 +58,11 @@ export async function installWeightsAction(_: ActionState, formData: FormData): 
 
 export async function deleteWeightsAction(_: ActionState, formData: FormData): Promise<ActionState> {
   try {
-    const token = formData.get('token')?.toString().trim() || '';
     const name = formData.get('name')?.toString();
     if (!name) {
       return { ok: false, message: 'Weight directory required' };
     }
-    await authorizedFetch(`/weights/${encodeURIComponent(name)}`, token, {
+    await authorizedFetch(`/weights/${encodeURIComponent(name)}`, {
       method: 'DELETE',
     });
     revalidatePath('/');
@@ -74,12 +74,11 @@ export async function deleteWeightsAction(_: ActionState, formData: FormData): P
 
 export async function activateModelAction(_: ActionState, formData: FormData): Promise<ActionState> {
   try {
-    const token = formData.get('token')?.toString().trim() || '';
     const id = formData.get('id')?.toString();
     if (!id) {
       return { ok: false, message: 'Model ID required' };
     }
-    await authorizedFetch('/models/activate', token, {
+    await authorizedFetch('/models/activate', {
       method: 'POST',
       body: JSON.stringify({ id }),
     });
@@ -87,5 +86,17 @@ export async function activateModelAction(_: ActionState, formData: FormData): P
     return { ok: true, message: `Activating ${id}` };
   } catch (err) {
     return { ok: false, message: err instanceof Error ? err.message : 'Failed to activate model' };
+  }
+}
+
+export async function deactivateModelAction(_: ActionState, __?: FormData): Promise<ActionState> {
+  try {
+    await authorizedFetch('/models/deactivate', {
+      method: 'POST',
+    });
+    revalidatePath('/');
+    return { ok: true, message: 'Deactivated active model' };
+  } catch (err) {
+    return { ok: false, message: err instanceof Error ? err.message : 'Failed to deactivate model' };
   }
 }

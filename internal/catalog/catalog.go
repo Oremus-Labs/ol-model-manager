@@ -127,3 +127,51 @@ func (c *Catalog) Count() int {
 
 	return len(c.models)
 }
+
+// All returns a deep copy of every catalog model currently loaded.
+func (c *Catalog) All() []*Model {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	models := make([]*Model, 0, len(c.models))
+	for _, model := range c.models {
+		if model == nil {
+			continue
+		}
+		models = append(models, model)
+	}
+	return cloneModels(models)
+}
+
+// Restore replaces the in-memory catalog with the supplied models.
+func (c *Catalog) Restore(models []*Model) {
+	cloned := cloneModels(models)
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.models = make(map[string]*Model, len(cloned))
+	for _, model := range cloned {
+		if model == nil || model.ID == "" {
+			continue
+		}
+		c.models[model.ID] = model
+	}
+}
+
+func cloneModels(models []*Model) []*Model {
+	if len(models) == 0 {
+		return nil
+	}
+	data, err := json.Marshal(models)
+	if err != nil {
+		log.Printf("failed to serialize catalog snapshot: %v", err)
+		return nil
+	}
+	var copy []*Model
+	if err := json.Unmarshal(data, &copy); err != nil {
+		log.Printf("failed to deserialize catalog snapshot: %v", err)
+		return nil
+	}
+	return copy
+}

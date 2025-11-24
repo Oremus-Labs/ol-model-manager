@@ -34,7 +34,7 @@ import (
 )
 
 const (
-	version         = "0.4.8-go"
+	version         = "0.4.9-go"
 	shutdownTimeout = 5 * time.Second
 )
 
@@ -110,6 +110,20 @@ func main() {
 		log.Fatalf("Failed to initialize state store: %v", err)
 	}
 	defer stateStore.Close()
+
+	if cat.Count() == 0 {
+		if snapshot, updatedAt, err := stateStore.LoadCatalogSnapshot(); err == nil && len(snapshot) > 0 {
+			cat.Restore(snapshot)
+			log.Printf("Restored %d catalog entries from datastore snapshot updated at %s", len(snapshot), updatedAt.Format(time.RFC3339))
+		} else if err != nil {
+			log.Printf("Catalog snapshot not available: %v", err)
+		}
+	}
+	if cat.Count() > 0 {
+		if err := stateStore.SaveCatalogSnapshot(cat.All()); err != nil {
+			log.Printf("Failed to persist initial catalog snapshot: %v", err)
+		}
+	}
 
 	jobManager := jobs.New(stateStore, weightManager, cfg.HuggingFaceToken)
 

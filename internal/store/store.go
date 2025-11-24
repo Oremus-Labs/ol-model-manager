@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/oremus-labs/ol-model-manager/internal/catalog"
+
 	_ "modernc.org/sqlite"
 )
 
@@ -102,6 +104,11 @@ func initSchema(db *sql.DB) error {
 			model_id TEXT,
 			metadata TEXT,
 			created_at TIMESTAMP NOT NULL
+		);`,
+		`CREATE TABLE IF NOT EXISTS catalog_cache (
+			id INTEGER PRIMARY KEY CHECK (id = 1),
+			snapshot TEXT NOT NULL,
+			updated_at TIMESTAMP NOT NULL
 		);`,
 	}
 	for _, stmt := range stmts {
@@ -257,4 +264,39 @@ func (s *Store) ListHistory(limit int) ([]HistoryEntry, error) {
 		entries = append(entries, e)
 	}
 	return entries, rows.Err()
+}
+
+// SaveCatalogSnapshot persists the catalog contents for reuse when git-sync is cold.
+func (s *Store) SaveCatalogSnapshot(models []*catalog.Model) error {
+	if s == nil || s.db == nil {
+		return errors.New("datastore not configured")
+	}
+	data, err := json.Marshal(models)
+	if err != nil {
+		return fmt.Errorf("failed to marshal catalog snapshot: %w", err)
+	}
+	_, err = s.db.Exec(`INSERT INTO catalog_cache (id, snapshot, updated_at)
+		VALUES (1, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET snapshot=excluded.snapshot, updated_at=excluded.updated_at`,
+		string(data), time.Now().UTC(),
+	)
+	return err
+}
+
+// LoadCatalogSnapshot pulls the last catalog snapshot.
+func (s *Store) LoadCatalogSnapshot() ([]*catalog.Model, time.Time, error) {
+	if s == nil || s.db == nil {
+		return nil, time.Time{}, errors.New("datastore not configured")
+	}
+	row := s.db.QueryRow(`SELECT snapshot, updated_at FROM catalog_cache WHERE id = 1`)
+	var snapshot string
+	var updated time.Time
+	if err := row.Scan(&snapshot, &updated); err != nil {
+		return nil, time.Time{}, err
+	}
+	var models []*catalog.Model
+	if err := json.Unmarshal([]byte(snapshot), &models); err != nil {
+		return nil, time.Time{}, fmt.Errorf("failed to decode catalog snapshot: %w", err)
+	}
+	return models, updated, nil
 }

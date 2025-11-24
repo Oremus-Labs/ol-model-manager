@@ -36,16 +36,6 @@ export function InstallWeightsForm() {
             className="mt-1 rounded-md border border-slate-700 bg-slate-900/60 px-3 py-2 text-base focus:border-brand-500 focus:outline-none"
           />
         </label>
-        <label className="flex flex-col text-sm">
-          API Token
-          <input
-            name="token"
-            type="password"
-            placeholder="Paste MODEL_MANAGER_API_TOKEN"
-            className="mt-1 rounded-md border border-slate-700 bg-slate-900/60 px-3 py-2 text-base focus:border-brand-500 focus:outline-none"
-            required
-          />
-        </label>
       </div>
       <label className="flex items-center gap-2 text-sm text-slate-300">
         <input type="checkbox" name="overwrite" className="accent-brand-500" />

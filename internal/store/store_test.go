@@ -3,6 +3,8 @@ package store
 import (
 	"path/filepath"
 	"testing"
+
+	"github.com/oremus-labs/ol-model-manager/internal/catalog"
 )
 
 func TestStoreJobsAndHistory(t *testing.T) {
@@ -73,4 +75,39 @@ func TestOpenCreatesDirectory(t *testing.T) {
 	t.Cleanup(func() {
 		_ = s.Close()
 	})
+}
+
+func TestCatalogSnapshotRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	s, err := Open(filepath.Join(dir, "state.db"), "sqlite")
+	if err != nil {
+		t.Fatalf("failed to open store: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = s.Close()
+	})
+
+	models := []*catalog.Model{
+		{ID: "foo", DisplayName: "Foo", HFModelID: "org/foo"},
+		{ID: "bar", DisplayName: "Bar", HFModelID: "org/bar"},
+	}
+	if err := s.SaveCatalogSnapshot(models); err != nil {
+		t.Fatalf("SaveCatalogSnapshot: %v", err)
+	}
+
+	loaded, updated, err := s.LoadCatalogSnapshot()
+	if err != nil {
+		t.Fatalf("LoadCatalogSnapshot: %v", err)
+	}
+	if len(loaded) != 2 {
+		t.Fatalf("expected 2 models, got %d", len(loaded))
+	}
+	if updated.IsZero() {
+		t.Fatalf("expected non-zero timestamp")
+	}
+	if loaded[0].ID == loaded[1].ID {
+		t.Fatalf("expected unique models in snapshot")
+	}
 }

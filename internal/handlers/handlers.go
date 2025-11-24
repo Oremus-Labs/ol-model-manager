@@ -110,6 +110,8 @@ type Handler struct {
 
 	catalogMu          sync.Mutex
 	lastCatalogRefresh time.Time
+	catalogStatus      string
+	catalogCacheTime   time.Time
 }
 
 // New creates a new Handler instance.
@@ -166,7 +168,8 @@ func New(cat *catalog.Catalog, ks *kserve.Client, wm weightStore, vdisc discover
 		store:              dataStore,
 		jobs:               jobMgr,
 		opts:               opts,
-		lastCatalogRefresh: time.Now(),
+		lastCatalogRefresh: time.Time{},
+		catalogStatus:      "unknown",
 	}
 }
 
@@ -230,6 +233,12 @@ func (h *Handler) SystemInfo(c *gin.Context) {
 		"modelsDir":   h.opts.CatalogModelsDir,
 		"count":       0,
 		"lastRefresh": h.lastCatalogRefresh,
+		"status":      h.catalogStatus,
+		"lastPersist": h.catalogCacheTime,
+		"source":      "git",
+	}
+	if h.catalogStatus == "cache" {
+		catalogInfo["source"] = "datastore"
 	}
 	if h.catalog != nil {
 		catalogInfo["count"] = h.catalog.Count()
@@ -1118,17 +1127,43 @@ func (h *Handler) ensureCatalogFresh(force bool) error {
 	h.catalogMu.Lock()
 	defer h.catalogMu.Unlock()
 
-	if force || h.lastCatalogRefresh.IsZero() || time.Since(h.lastCatalogRefresh) > h.opts.CatalogTTL {
-		if err := h.catalog.Reload(); err != nil {
-			if errors.Is(err, catalog.ErrModelsDirMissing) {
-				log.Printf("Catalog directory not ready yet: %v", err)
-				h.lastCatalogRefresh = time.Time{}
-				return nil
-			}
-			return err
-		}
-		h.lastCatalogRefresh = time.Now()
+	refresh := force || h.lastCatalogRefresh.IsZero() || time.Since(h.lastCatalogRefresh) > h.opts.CatalogTTL || h.catalogStatus == "syncing"
+	if !refresh {
+		return nil
 	}
+
+	if err := h.catalog.Reload(); err != nil {
+		if errors.Is(err, catalog.ErrModelsDirMissing) {
+			log.Printf("Catalog directory not ready yet: %v", err)
+			h.catalogStatus = "syncing"
+			h.lastCatalogRefresh = time.Time{}
+			if h.store != nil {
+				if models, updatedAt, err := h.store.LoadCatalogSnapshot(); err == nil && len(models) > 0 {
+					h.catalog.Restore(models)
+					h.lastCatalogRefresh = updatedAt
+					h.catalogCacheTime = updatedAt
+					h.catalogStatus = "cache"
+					log.Printf("Hydrated catalog from datastore snapshot updated at %s", updatedAt.Format(time.RFC3339))
+				} else if err != nil {
+					log.Printf("catalog snapshot unavailable: %v", err)
+				}
+			}
+			return nil
+		}
+		return err
+	}
+
+	now := time.Now()
+	h.lastCatalogRefresh = now
+	h.catalogStatus = "live"
+	h.catalogCacheTime = now
+
+	if h.store != nil {
+		if err := h.store.SaveCatalogSnapshot(h.catalog.All()); err != nil {
+			log.Printf("Failed to persist catalog snapshot: %v", err)
+		}
+	}
+
 	return nil
 }
 

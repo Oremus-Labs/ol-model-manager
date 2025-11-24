@@ -5,6 +5,9 @@ export interface SystemInfo {
     modelsDir?: string;
     count?: number;
     lastRefresh?: string;
+    status?: string;
+    lastPersist?: string;
+    source?: string;
   };
   weights?: {
     path?: string;
@@ -130,4 +133,17 @@ export interface ModelInsight {
   suggestedCatalog?: Model;
   recommendedFiles?: string[];
   notes?: string[];
+}
+
+export interface ActiveService {
+  status: string;
+  message?: string;
+  inferenceservice?: {
+    metadata?: {
+      name?: string;
+      annotations?: Record<string, string>;
+    };
+    spec?: Record<string, unknown>;
+    status?: Record<string, unknown>;
+  };
 }

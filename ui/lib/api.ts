@@ -1,5 +1,5 @@
 import { API_BASE_URL } from './config';
-import type { Architecture, HistoryEntry, Job, Model, ModelInsight, SystemInfo, WeightInfo } from './types';
+import type { ActiveService, Architecture, HistoryEntry, Job, Model, ModelInsight, SystemInfo, WeightInfo } from './types';
 
 type JSONValue = Record<string, unknown>;
 
@@ -53,15 +53,12 @@ export async function getArchitectures(): Promise<Architecture[]> {
   return data?.architectures ?? [];
 }
 
-export async function searchHuggingFace(params: { query: string; compatibleOnly?: boolean }): Promise<ModelInsight[]> {
+export async function searchHuggingFace(params: { query: string }): Promise<ModelInsight[]> {
   if (!params.query) {
     return [];
   }
   const search = new URLSearchParams();
   search.set('q', params.query);
-  if (params.compatibleOnly) {
-    search.set('compatibleOnly', 'true');
-  }
   const data = await fetchJSON<{ results: ModelInsight[] }>(`/huggingface/search?${search.toString()}`);
   return data?.results ?? [];
 }
@@ -72,4 +69,9 @@ export async function getCatalogJSON(modelId: string): Promise<JSONValue | null>
     body: JSON.stringify({ hfModelId: modelId }),
     headers: { 'Content-Type': 'application/json' },
   });
+}
+
+export async function getActiveService(): Promise<ActiveService | null> {
+  const data = await fetchJSON<ActiveService>('/active');
+  return data ?? null;
 }
