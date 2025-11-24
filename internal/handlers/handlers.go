@@ -250,6 +250,15 @@ func (h *Handler) StreamEvents(c *gin.Context) {
 	c.Writer.Header().Set("Cache-Control", "no-cache")
 	c.Writer.Header().Set("Connection", "keep-alive")
 
+	// Prime the stream with the latest jobs so clients immediately see something meaningful.
+	if h.store != nil {
+		if jobs, err := h.store.ListJobs(5); err == nil {
+			for _, job := range jobs {
+				c.SSEvent(fmt.Sprintf("job.%s", job.Status), job)
+			}
+		}
+	}
+
 	c.Stream(func(w io.Writer) bool {
 		select {
 		case evt, ok := <-stream:
