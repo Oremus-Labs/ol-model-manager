@@ -329,6 +329,34 @@ func buildVLLMArgs(model *catalog.Model) []string {
 		args = append(args, "--served-model-name", servedName)
 	}
 
+	if vllm != nil && len(vllm.ExtraArgs) > 0 {
+		blockedPrefixes := []string{
+			"--model",
+			"--host",
+			"--port",
+			"--served-model-name",
+		}
+		for _, raw := range vllm.ExtraArgs {
+			trimmed := strings.TrimSpace(raw)
+			if trimmed == "" {
+				continue
+			}
+			lower := strings.ToLower(trimmed)
+			blocked := false
+			for _, prefix := range blockedPrefixes {
+				if strings.HasPrefix(lower, prefix) {
+					blocked = true
+					log.Printf("Skipping disallowed vLLM extra arg '%s'", trimmed)
+					break
+				}
+			}
+			if blocked {
+				continue
+			}
+			args = append(args, trimmed)
+		}
+	}
+
 	return args
 }
 

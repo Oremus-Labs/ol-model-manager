@@ -2,20 +2,20 @@ package catalog
 
 // Model represents a complete model configuration.
 type Model struct {
-	ID           string            `json:"id"`
-	DisplayName  string            `json:"displayName,omitempty"`
-	HFModelID    string            `json:"hfModelId,omitempty"`
-	ServedModelName string         `json:"servedModelName,omitempty"`
-	StorageURI   string            `json:"storageUri,omitempty"`
-	Runtime      string            `json:"runtime,omitempty"`
-	Env          []EnvVar          `json:"env,omitempty"`
-	Storage      *Storage          `json:"storage,omitempty"`
-	VLLM         *VLLMConfig       `json:"vllm,omitempty"`
-	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
-	Tolerations  []Toleration      `json:"tolerations,omitempty"`
-	Resources    *Resources        `json:"resources,omitempty"`
-	VolumeMounts []VolumeMount     `json:"volumeMounts,omitempty"`
-	Volumes      []Volume          `json:"volumes,omitempty"`
+	ID              string            `json:"id"`
+	DisplayName     string            `json:"displayName,omitempty"`
+	HFModelID       string            `json:"hfModelId,omitempty"`
+	ServedModelName string            `json:"servedModelName,omitempty"`
+	StorageURI      string            `json:"storageUri,omitempty"`
+	Runtime         string            `json:"runtime,omitempty"`
+	Env             []EnvVar          `json:"env,omitempty"`
+	Storage         *Storage          `json:"storage,omitempty"`
+	VLLM            *VLLMConfig       `json:"vllm,omitempty"`
+	NodeSelector    map[string]string `json:"nodeSelector,omitempty"`
+	Tolerations     []Toleration      `json:"tolerations,omitempty"`
+	Resources       *Resources        `json:"resources,omitempty"`
+	VolumeMounts    []VolumeMount     `json:"volumeMounts,omitempty"`
+	Volumes         []Volume          `json:"volumes,omitempty"`
 }
 
 // ModelSummary is a simplified model representation for listing.
@@ -68,6 +68,7 @@ type VLLMConfig struct {
 	GPUMemoryUtilization *float64 `json:"gpuMemoryUtilization,omitempty"`
 	MaxModelLen          *int     `json:"maxModelLen,omitempty"`
 	TrustRemoteCode      *bool    `json:"trustRemoteCode,omitempty"`
+	ExtraArgs            []string `json:"extraArgs,omitempty"`
 }
 
 // Toleration represents a Kubernetes toleration.
