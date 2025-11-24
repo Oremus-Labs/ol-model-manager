@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
@@ -13,6 +14,7 @@ import (
 	"github.com/oremus-labs/ol-model-manager/config"
 	"github.com/oremus-labs/ol-model-manager/internal/events"
 	"github.com/oremus-labs/ol-model-manager/internal/jobs"
+	"github.com/oremus-labs/ol-model-manager/internal/queue"
 	"github.com/oremus-labs/ol-model-manager/internal/redisx"
 	"github.com/oremus-labs/ol-model-manager/internal/store"
 	"github.com/oremus-labs/ol-model-manager/internal/weights"
@@ -66,11 +68,19 @@ func main() {
 		EventPublisher:     eventBus,
 	})
 
+	var jobConsumer *queue.Consumer
+	if redisClient != nil {
+		host, _ := os.Hostname()
+		consumerName := fmt.Sprintf("%s-%d", host, time.Now().UnixNano())
+		jobConsumer = queue.NewConsumer(redisClient, cfg.RedisJobStream, cfg.RedisJobGroup, consumerName)
+	}
+
 	runner := worker.New(worker.Options{
 		Store:    stateStore,
 		Jobs:     jobManager,
 		Logger:   log.Default(),
 		Interval: 1 * time.Minute,
+		Queue:    jobConsumer,
 	})
 
 	if err := runner.Run(ctx); err != nil && err != context.Canceled {

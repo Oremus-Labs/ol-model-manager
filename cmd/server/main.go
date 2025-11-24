@@ -19,6 +19,7 @@ import (
 	"github.com/oremus-labs/ol-model-manager/internal/jobs"
 	"github.com/oremus-labs/ol-model-manager/internal/kserve"
 	"github.com/oremus-labs/ol-model-manager/internal/kube"
+	"github.com/oremus-labs/ol-model-manager/internal/queue"
 	"github.com/oremus-labs/ol-model-manager/internal/recommendations"
 	"github.com/oremus-labs/ol-model-manager/internal/redisx"
 	"github.com/oremus-labs/ol-model-manager/internal/store"
@@ -133,6 +134,11 @@ func main() {
 		Channel: cfg.EventsChannel,
 	})
 
+	var jobQueue *queue.Producer
+	if redisClient != nil {
+		jobQueue = queue.NewProducer(redisClient, cfg.RedisJobStream)
+	}
+
 	jobManager := jobs.New(jobs.Options{
 		Store:              stateStore,
 		Weights:            weightManager,
@@ -183,7 +189,7 @@ func main() {
 	}
 
 	// Initialize handlers
-	h := handlers.New(cat, ksClient, weightManager, vllmDiscovery, catalogValidator, catWriter, advisor, stateStore, jobManager, eventBus, handlers.Options{
+	h := handlers.New(cat, ksClient, weightManager, vllmDiscovery, catalogValidator, catWriter, advisor, stateStore, jobManager, eventBus, jobQueue, handlers.Options{
 		CatalogTTL:             cfg.CatalogRefreshInterval,
 		WeightsInstallTimeout:  cfg.WeightsInstallTimeout,
 		HuggingFaceToken:       cfg.HuggingFaceToken,

@@ -30,10 +30,9 @@ Hit /health, /events to ensure base server runs.
 ✅ Current status (Nov 24):
 - `internal/api` + middleware/metrics + `/events` SSE endpoint landed.
 - Redis/Postgres config + clients wired; SQLite and Postgres both supported.
-- Event bus publishes job updates; handlers stream them via SSE.
-- New binaries `cmd/worker` and `cmd/sync` scaffold long-lived Deployments (heartbeat only for now).
-- Worker + sync packages (`internal/worker`, `internal/syncsvc`) keep the processes alive until queue/sync logic is implemented in Phase 1/2.
-- Helm migration to Deployments still TODO (requires chart updates + GitOps bump).
+- Event bus publishes job updates; handlers stream them via SSE (now seeded + flushed).
+- Redis Stream queue + worker wiring complete: `/weights/install` publishes to the stream, `cmd/worker` consumes via a consumer group, and jobs only run inline when Redis is unavailable.
+- New binaries `cmd/worker` and `cmd/sync` run as Deployments behind Traefik ingress; Knative Service fully removed.
 Phase 1 – Jobs queue + worker
 Create job producer API
 

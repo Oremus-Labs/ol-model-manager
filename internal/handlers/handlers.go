@@ -24,6 +24,7 @@ import (
 	"github.com/oremus-labs/ol-model-manager/internal/jobs"
 	"github.com/oremus-labs/ol-model-manager/internal/kserve"
 	"github.com/oremus-labs/ol-model-manager/internal/openapi"
+	"github.com/oremus-labs/ol-model-manager/internal/queue"
 	"github.com/oremus-labs/ol-model-manager/internal/recommendations"
 	"github.com/oremus-labs/ol-model-manager/internal/store"
 	"github.com/oremus-labs/ol-model-manager/internal/validator"
@@ -87,6 +88,8 @@ type catalogWriter interface {
 
 type jobManager interface {
 	EnqueueWeightInstall(jobs.InstallRequest) (*store.Job, error)
+	CreateJob(jobs.InstallRequest) (*store.Job, error)
+	ExecuteJob(*store.Job, jobs.InstallRequest)
 }
 
 type eventBus interface {
@@ -113,6 +116,7 @@ type Handler struct {
 	store   *store.Store
 	jobs    jobManager
 	events  eventBus
+	queue   *queue.Producer
 	opts    Options
 
 	catalogMu          sync.Mutex
@@ -122,7 +126,7 @@ type Handler struct {
 }
 
 // New creates a new Handler instance.
-func New(cat *catalog.Catalog, ks *kserve.Client, wm weightStore, vdisc discoveryService, val catalogValidator, writer catalogWriter, advisor recommendationService, dataStore *store.Store, jobMgr jobManager, evt eventBus, opts Options) *Handler {
+func New(cat *catalog.Catalog, ks *kserve.Client, wm weightStore, vdisc discoveryService, val catalogValidator, writer catalogWriter, advisor recommendationService, dataStore *store.Store, jobMgr jobManager, evt eventBus, q *queue.Producer, opts Options) *Handler {
 	if opts.CatalogTTL <= 0 {
 		opts.CatalogTTL = time.Minute
 	}
@@ -175,6 +179,7 @@ func New(cat *catalog.Catalog, ks *kserve.Client, wm weightStore, vdisc discover
 		store:              dataStore,
 		jobs:               jobMgr,
 		events:             evt,
+		queue:              q,
 		opts:               opts,
 		lastCatalogRefresh: time.Time{},
 		catalogStatus:      "unknown",
@@ -751,7 +756,7 @@ func (h *Handler) InstallWeights(c *gin.Context) {
 	inferencePath := path.Join(h.opts.InferenceModelRoot, targetName)
 
 	if h.jobs != nil {
-		job, err := h.jobs.EnqueueWeightInstall(jobs.InstallRequest{
+		job, err := h.jobs.CreateJob(jobs.InstallRequest{
 			ModelID:   req.HFModelID,
 			Revision:  req.Revision,
 			Target:    req.Target,
@@ -759,10 +764,38 @@ func (h *Handler) InstallWeights(c *gin.Context) {
 			Overwrite: req.Overwrite,
 		})
 		if err != nil {
-			log.Printf("Failed to enqueue weight install: %v", err)
+			log.Printf("Failed to create job record: %v", err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
+
+		if h.queue != nil {
+			if err := h.queue.Enqueue(c.Request.Context(), job.ID, jobs.InstallRequest{
+				ModelID:   req.HFModelID,
+				Revision:  req.Revision,
+				Target:    req.Target,
+				Files:     files,
+				Overwrite: req.Overwrite,
+			}); err != nil {
+				log.Printf("Failed to enqueue job to redis: %v, running inline", err)
+				h.jobs.ExecuteJob(job, jobs.InstallRequest{
+					ModelID:   req.HFModelID,
+					Revision:  req.Revision,
+					Target:    req.Target,
+					Files:     files,
+					Overwrite: req.Overwrite,
+				})
+			}
+		} else {
+			h.jobs.ExecuteJob(job, jobs.InstallRequest{
+				ModelID:   req.HFModelID,
+				Revision:  req.Revision,
+				Target:    req.Target,
+				Files:     files,
+				Overwrite: req.Overwrite,
+			})
+		}
+
 		c.JSON(http.StatusAccepted, gin.H{
 			"status":               "queued",
 			"job":                  job,

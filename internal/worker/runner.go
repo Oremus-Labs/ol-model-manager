@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/oremus-labs/ol-model-manager/internal/jobs"
+	"github.com/oremus-labs/ol-model-manager/internal/queue"
 	"github.com/oremus-labs/ol-model-manager/internal/store"
 )
 
@@ -14,14 +15,16 @@ type Options struct {
 	Store    *store.Store
 	Jobs     *jobs.Manager
 	Logger   *log.Logger
+	Queue    *queue.Consumer
 	Interval time.Duration
 }
 
-// Runner is a placeholder executor that will later consume Redis jobs.
+// Runner processes queued jobs.
 type Runner struct {
 	store    *store.Store
 	jobs     *jobs.Manager
 	logger   *log.Logger
+	queue    *queue.Consumer
 	interval time.Duration
 }
 
@@ -38,28 +41,69 @@ func New(opts Options) *Runner {
 		store:    opts.Store,
 		jobs:     opts.Jobs,
 		logger:   opts.Logger,
+		queue:    opts.Queue,
 		interval: interval,
 	}
 }
 
-// Run starts the worker heartbeat loop. Phase 1 will replace this ticker with Redis Streams consumption.
+// Run starts the worker loop.
 func (r *Runner) Run(ctx context.Context) error {
 	if r.logger == nil {
 		r.logger = log.Default()
 	}
-	r.logger.Println("model-manager worker started — waiting for queued jobs")
 
-	ticker := time.NewTicker(r.interval)
-	defer ticker.Stop()
+	if r.queue == nil {
+		r.logger.Println("worker queue not configured; falling back to heartbeat")
+		ticker := time.NewTicker(r.interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-ticker.C:
+				count := r.pendingJobs()
+				r.logger.Printf("worker heartbeat: %d jobs recorded", count)
+			}
+		}
+	}
+
+	if err := r.queue.EnsureGroup(ctx); err != nil {
+		return err
+	}
+	r.logger.Println("worker connected to Redis queue; waiting for jobs")
 
 	for {
 		select {
 		case <-ctx.Done():
 			r.logger.Println("worker shutting down")
 			return ctx.Err()
-		case <-ticker.C:
-			count := r.pendingJobs()
-			r.logger.Printf("worker heartbeat: %d jobs recorded (queue not yet enabled)", count)
+		default:
+			msg, msgID, err := r.queue.Next(ctx)
+			if err != nil {
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+				r.logger.Printf("worker queue read error: %v", err)
+				time.Sleep(time.Second)
+				continue
+			}
+			if msg == nil {
+				continue
+			}
+
+			job, err := r.jobs.GetJob(msg.JobID)
+			if err != nil {
+				r.logger.Printf("worker: job %s missing: %v", msg.JobID, err)
+				_ = r.queue.Ack(ctx, msgID)
+				continue
+			}
+
+			r.logger.Printf("worker: processing job %s (%s)", msg.JobID, msg.Request.ModelID)
+			r.jobs.ProcessJob(job, msg.Request)
+
+			if err := r.queue.Ack(ctx, msgID); err != nil {
+				r.logger.Printf("worker: failed to ack message %s: %v", msgID, err)
+			}
 		}
 	}
 }

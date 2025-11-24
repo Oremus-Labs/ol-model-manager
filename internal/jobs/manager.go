@@ -56,15 +56,25 @@ func New(opts Options) *Manager {
 
 // InstallRequest describes a weight installation job.
 type InstallRequest struct {
-	ModelID   string
-	Revision  string
-	Target    string
-	Files     []string
-	Overwrite bool
+	ModelID   string   `json:"modelId"`
+	Revision  string   `json:"revision,omitempty"`
+	Target    string   `json:"target"`
+	Files     []string `json:"files,omitempty"`
+	Overwrite bool     `json:"overwrite"`
 }
 
-// EnqueueWeightInstall schedules a weight install job.
+// EnqueueWeightInstall schedules a weight install job asynchronously.
 func (m *Manager) EnqueueWeightInstall(req InstallRequest) (*store.Job, error) {
+	job, err := m.CreateJob(req)
+	if err != nil {
+		return nil, err
+	}
+	m.ExecuteJob(job, req)
+	return job, nil
+}
+
+// CreateJob persists a new pending job without executing it.
+func (m *Manager) CreateJob(req InstallRequest) (*store.Job, error) {
 	if m.store == nil || m.weights == nil {
 		return nil, fmt.Errorf("job manager not configured")
 	}
@@ -81,12 +91,28 @@ func (m *Manager) EnqueueWeightInstall(req InstallRequest) (*store.Job, error) {
 	if err := m.store.CreateJob(job); err != nil {
 		return nil, err
 	}
-
-	go m.runInstall(job, req)
 	return job, nil
 }
 
-func (m *Manager) runInstall(job *store.Job, req InstallRequest) {
+// ExecuteJob kicks off the job asynchronously.
+func (m *Manager) ExecuteJob(job *store.Job, req InstallRequest) {
+	go m.processJob(job, req)
+}
+
+// ProcessJob executes the job synchronously (used by workers).
+func (m *Manager) ProcessJob(job *store.Job, req InstallRequest) {
+	m.processJob(job, req)
+}
+
+// GetJob loads a job by ID.
+func (m *Manager) GetJob(id string) (*store.Job, error) {
+	if m.store == nil {
+		return nil, fmt.Errorf("job manager not configured")
+	}
+	return m.store.GetJob(id)
+}
+
+func (m *Manager) processJob(job *store.Job, req InstallRequest) {
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Hour)
 	defer cancel()
 

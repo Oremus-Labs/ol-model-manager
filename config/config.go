@@ -56,6 +56,8 @@ type Config struct {
 	RedisTLSEnabled  bool
 	RedisTLSInsecure bool
 	EventsChannel    string
+	RedisJobStream   string
+	RedisJobGroup    string
 
 	// External tokens
 	HuggingFaceToken string
@@ -114,6 +116,8 @@ func Load() *Config {
 		RedisTLSEnabled:        getEnvBool("REDIS_TLS_ENABLED", false),
 		RedisTLSInsecure:       getEnvBool("REDIS_TLS_INSECURE_SKIP_VERIFY", false),
 		EventsChannel:          getEnv("EVENTS_CHANNEL", "model-manager-events"),
+		RedisJobStream:         getEnv("REDIS_JOB_STREAM", "model-manager:jobs"),
+		RedisJobGroup:          getEnv("REDIS_JOB_GROUP", "weights-workers"),
 		HuggingFaceToken:       os.Getenv("HUGGINGFACE_API_TOKEN"),
 		GitHubToken:            os.Getenv("GITHUB_TOKEN"),
 		GitAuthorName:          getEnv("GIT_AUTHOR_NAME", ""),
