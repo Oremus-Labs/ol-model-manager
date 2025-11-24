@@ -35,7 +35,7 @@ func TestListWeights(t *testing.T) {
 		}},
 	}
 
-	handler := New(nil, nil, store, nil, nil, nil, nil, nil, nil, nil, nil, Options{})
+	handler := New(nil, nil, store, nil, nil, nil, nil, nil, nil, nil, nil, nil, Options{})
 
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
@@ -79,7 +79,7 @@ func TestInstallWeightsDerivesFilesFromHuggingFace(t *testing.T) {
 		},
 	}
 
-	handler := New(nil, nil, store, discovery, nil, nil, nil, nil, nil, nil, nil, Options{
+	handler := New(nil, nil, store, discovery, nil, nil, nil, nil, nil, nil, nil, nil, Options{
 		WeightsPVCName:     "venus-model-storage",
 		InferenceModelRoot: "/mnt/models",
 	})
@@ -140,7 +140,7 @@ func TestDeleteJobsEndpoint(t *testing.T) {
 	t.Parallel()
 
 	stateStore := openTestStore(t)
-	handler := New(nil, nil, nil, nil, nil, nil, nil, stateStore, nil, nil, nil, Options{})
+	handler := New(nil, nil, nil, nil, nil, nil, nil, stateStore, nil, nil, nil, nil, Options{})
 
 	if err := stateStore.CreateJob(&store.Job{ID: "job-delete", Type: "weight_install"}); err != nil {
 		t.Fatalf("CreateJob: %v", err)
@@ -164,7 +164,7 @@ func TestClearHistoryEndpoint(t *testing.T) {
 	t.Parallel()
 
 	stateStore := openTestStore(t)
-	handler := New(nil, nil, nil, nil, nil, nil, nil, stateStore, nil, nil, nil, Options{})
+	handler := New(nil, nil, nil, nil, nil, nil, nil, stateStore, nil, nil, nil, nil, Options{})
 
 	if err := stateStore.AppendHistory(&store.HistoryEntry{Event: "test"}); err != nil {
 		t.Fatalf("AppendHistory: %v", err)
@@ -187,7 +187,7 @@ func TestClearHistoryEndpoint(t *testing.T) {
 func TestInstallWeightsRejectsInvalidHFID(t *testing.T) {
 	t.Parallel()
 
-	handler := New(nil, nil, &fakeWeightStore{}, &fakeDiscovery{}, nil, nil, nil, nil, nil, nil, nil, Options{})
+	handler := New(nil, nil, &fakeWeightStore{}, &fakeDiscovery{}, nil, nil, nil, nil, nil, nil, nil, nil, Options{})
 
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
@@ -209,7 +209,7 @@ func TestGenerateCatalogEntry(t *testing.T) {
 		modelResp: &catalog.Model{ID: "draft-model", HFModelID: "foo/bar"},
 	}
 
-	handler := New(nil, nil, nil, discovery, nil, nil, nil, nil, nil, nil, nil, Options{})
+	handler := New(nil, nil, nil, discovery, nil, nil, nil, nil, nil, nil, nil, nil, Options{})
 
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
@@ -248,7 +248,7 @@ func TestCreateCatalogPR(t *testing.T) {
 		},
 	}
 
-	handler := New(nil, nil, nil, nil, nil, writer, nil, nil, nil, nil, nil, Options{
+	handler := New(nil, nil, nil, nil, nil, writer, nil, nil, nil, nil, nil, nil, Options{
 		GitHubToken: "token",
 	})
 
@@ -292,7 +292,7 @@ func TestDescribeVLLMModel(t *testing.T) {
 		},
 	}
 
-	handler := New(nil, nil, nil, discovery, nil, nil, &fakeAdvisor{}, nil, nil, nil, nil, Options{})
+	handler := New(nil, nil, nil, discovery, nil, nil, &fakeAdvisor{}, nil, nil, nil, nil, nil, Options{})
 
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
@@ -331,7 +331,7 @@ func TestGetHuggingFaceModel(t *testing.T) {
 			HFModel: &vllm.HuggingFaceModel{ModelID: "foo/bar"},
 		},
 	}
-	handler := New(nil, nil, nil, discovery, nil, nil, nil, nil, nil, nil, nil, Options{})
+	handler := New(nil, nil, nil, discovery, nil, nil, nil, nil, nil, nil, nil, nil, Options{})
 
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
@@ -354,7 +354,7 @@ func TestGetVLLMArchitecture(t *testing.T) {
 			Source:            "class Qwen: pass",
 		},
 	}
-	handler := New(nil, nil, nil, discovery, nil, nil, nil, nil, nil, nil, nil, Options{})
+	handler := New(nil, nil, nil, discovery, nil, nil, nil, nil, nil, nil, nil, nil, Options{})
 
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
@@ -374,7 +374,7 @@ func TestSystemInfo(t *testing.T) {
 	wm := &fakeWeightStore{
 		statsResp: &weights.StorageStats{ModelCount: 1},
 	}
-h := New(&catalog.Catalog{}, nil, wm, nil, nil, nil, &fakeAdvisor{}, nil, nil, nil, nil, Options{
+	h := New(&catalog.Catalog{}, nil, wm, nil, nil, nil, &fakeAdvisor{}, nil, nil, nil, nil, nil, Options{
 		Version:                "0.0.1",
 		CatalogRoot:            "/catalog",
 		CatalogModelsDir:       "models",
@@ -427,7 +427,7 @@ func TestListJobsFilters(t *testing.T) {
 	t.Parallel()
 
 	st := newTempStore(t)
-h := New(nil, nil, nil, nil, nil, nil, nil, st, nil, nil, nil, Options{HistoryLimit: 5})
+	h := New(nil, nil, nil, nil, nil, nil, nil, st, nil, nil, nil, nil, Options{HistoryLimit: 5})
 
 	job1 := &store.Job{
 		ID:      "job-1",
@@ -474,7 +474,7 @@ func TestListHistoryFilters(t *testing.T) {
 	t.Parallel()
 
 	st := newTempStore(t)
-h := New(nil, nil, nil, nil, nil, nil, nil, st, nil, nil, nil, Options{HistoryLimit: 5})
+	h := New(nil, nil, nil, nil, nil, nil, nil, st, nil, nil, nil, nil, Options{HistoryLimit: 5})
 
 	_ = st.AppendHistory(&store.HistoryEntry{ID: "1", Event: "weight_install_completed", ModelID: "foo"})
 	_ = st.AppendHistory(&store.HistoryEntry{ID: "2", Event: "model_activated", ModelID: "bar"})
@@ -503,7 +503,7 @@ h := New(nil, nil, nil, nil, nil, nil, nil, st, nil, nil, nil, Options{HistoryLi
 func TestOpenAPISpecEndpoint(t *testing.T) {
 	t.Parallel()
 
-h := New(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, Options{})
+	h := New(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, Options{})
 
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
@@ -528,7 +528,7 @@ func TestSearchHuggingFaceParsesFilters(t *testing.T) {
 		},
 	}
 
-h := New(nil, nil, nil, discovery, nil, nil, nil, nil, nil, nil, nil, Options{})
+	h := New(nil, nil, nil, discovery, nil, nil, nil, nil, nil, nil, nil, nil, Options{})
 
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/huggingface/search?q=Qwen&limit=5&pipelineTag=text-generation&author=hf&license=apache-2.0&tag=quantized&tags=gguf,ggml&compatibleOnly=true&sort=downloads&direction=desc", nil)
@@ -556,6 +556,38 @@ h := New(nil, nil, nil, discovery, nil, nil, nil, nil, nil, nil, nil, Options{})
 	}
 	if len(opts.Tags) != 3 {
 		t.Fatalf("expected tags to be parsed: %+v", opts.Tags)
+	}
+}
+
+func TestSearchHuggingFaceUsesCache(t *testing.T) {
+	t.Parallel()
+
+	cache := &fakeHFCache{
+		list: []vllm.HuggingFaceModel{
+			{ModelID: "foo/bar", Downloads: 42},
+		},
+	}
+
+	h := New(nil, nil, nil, &fakeDiscovery{}, nil, nil, nil, nil, nil, nil, nil, cache, Options{})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/huggingface/search?q=foo", nil)
+	c, _ := gin.CreateTestContext(w)
+	c.Request = req
+
+	h.SearchHuggingFace(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 got %d body=%s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Results []vllm.HuggingFaceModel `json:"results"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if len(resp.Results) != 1 || resp.Results[0].ModelID != "foo/bar" {
+		t.Fatalf("expected cached result, got %+v", resp.Results)
 	}
 }
 
@@ -651,6 +683,19 @@ func (f *fakeDiscovery) GetArchitectureDetail(name string) (*vllm.ArchitectureDe
 	}
 	detail := *f.archDetail
 	return &detail, nil
+}
+
+type fakeHFCache struct {
+	list  []vllm.HuggingFaceModel
+	model *vllm.HuggingFaceModel
+}
+
+func (f *fakeHFCache) List(context.Context) ([]vllm.HuggingFaceModel, error) {
+	return f.list, nil
+}
+
+func (f *fakeHFCache) Get(context.Context, string) (*vllm.HuggingFaceModel, error) {
+	return f.model, nil
 }
 
 type fakeCatalogWriter struct {

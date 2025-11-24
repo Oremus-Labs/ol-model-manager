@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/oremus-labs/ol-model-manager/internal/catalog"
+	"github.com/oremus-labs/ol-model-manager/internal/vllm"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 	_ "modernc.org/sqlite"
@@ -117,6 +118,11 @@ func initSchema(db *sql.DB, driver string) error {
 			metadata TEXT,
 			created_at TIMESTAMP NOT NULL
 		);`
+	hfModelsTable := `CREATE TABLE IF NOT EXISTS hf_models (
+			model_id TEXT PRIMARY KEY,
+			payload TEXT NOT NULL,
+			updated_at TIMESTAMP NOT NULL
+		);`
 	if driver == "postgres" {
 		jobTable = `CREATE TABLE IF NOT EXISTS jobs (
 			id TEXT PRIMARY KEY,
@@ -138,12 +144,18 @@ func initSchema(db *sql.DB, driver string) error {
 			metadata TEXT,
 			created_at TIMESTAMPTZ NOT NULL
 		);`
+		hfModelsTable = `CREATE TABLE IF NOT EXISTS hf_models (
+			model_id TEXT PRIMARY KEY,
+			payload TEXT NOT NULL,
+			updated_at TIMESTAMPTZ NOT NULL
+		);`
 	}
 	stmts = append(stmts,
 		jobTable,
 		`CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);`,
 		`CREATE INDEX IF NOT EXISTS idx_jobs_type ON jobs(type);`,
 		historyTable,
+		hfModelsTable,
 		`CREATE TABLE IF NOT EXISTS catalog_cache (
 			id INTEGER PRIMARY KEY CHECK (id = 1),
 			snapshot TEXT NOT NULL,
@@ -293,6 +305,103 @@ func (s *Store) AppendHistory(entry *HistoryEntry) error {
 		entry.ID = fmt.Sprintf("%d", id)
 	}
 	return nil
+}
+
+// ReplaceHFModels replaces cached Hugging Face models.
+func (s *Store) ReplaceHFModels(models []vllm.HuggingFaceModel) error {
+	if s == nil || s.db == nil {
+		return errors.New("store not initialized")
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+	if _, err = tx.Exec(`DELETE FROM hf_models`); err != nil {
+		return err
+	}
+	stmt, err := tx.Prepare(s.rebind(`INSERT INTO hf_models (model_id, payload, updated_at) VALUES (?, ?, ?)`))
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	now := time.Now().UTC()
+	for _, model := range models {
+		id := canonicalModelID(model)
+		if id == "" {
+			continue
+		}
+		payload, err := json.Marshal(model)
+		if err != nil {
+			return err
+		}
+		if _, err := stmt.Exec(id, string(payload), now); err != nil {
+			return err
+		}
+	}
+	err = tx.Commit()
+	return err
+}
+
+// ListHFModels returns cached Hugging Face models.
+func (s *Store) ListHFModels() ([]vllm.HuggingFaceModel, error) {
+	if s == nil || s.db == nil {
+		return nil, errors.New("store not initialized")
+	}
+	rows, err := s.db.Query(`SELECT payload FROM hf_models ORDER BY updated_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var models []vllm.HuggingFaceModel
+	for rows.Next() {
+		var payload string
+		if err := rows.Scan(&payload); err != nil {
+			return nil, err
+		}
+		var model vllm.HuggingFaceModel
+		if err := json.Unmarshal([]byte(payload), &model); err != nil {
+			continue
+		}
+		models = append(models, model)
+	}
+	return models, rows.Err()
+}
+
+// GetHFModel fetches a single cached HF model.
+func (s *Store) GetHFModel(id string) (*vllm.HuggingFaceModel, error) {
+	if s == nil || s.db == nil {
+		return nil, errors.New("store not initialized")
+	}
+	id = strings.TrimSpace(strings.ToLower(id))
+	if id == "" {
+		return nil, errors.New("model id required")
+	}
+	query := s.rebind(`SELECT payload FROM hf_models WHERE model_id=?`)
+	var payload string
+	err := s.db.QueryRow(query, id).Scan(&payload)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var model vllm.HuggingFaceModel
+	if err := json.Unmarshal([]byte(payload), &model); err != nil {
+		return nil, err
+	}
+	return &model, nil
+}
+
+func canonicalModelID(model vllm.HuggingFaceModel) string {
+	if strings.TrimSpace(model.ModelID) != "" {
+		return strings.ToLower(model.ModelID)
+	}
+	return strings.ToLower(model.ID)
 }
 
 // ListHistory returns the newest history entries.

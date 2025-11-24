@@ -12,6 +12,7 @@ import (
 	"path"
 	"reflect"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -106,6 +107,11 @@ type recommendationService interface {
 }
 
 // Handler encapsulates dependencies for HTTP handlers.
+type huggingFaceCache interface {
+	List(context.Context) ([]vllm.HuggingFaceModel, error)
+	Get(context.Context, string) (*vllm.HuggingFaceModel, error)
+}
+
 type Handler struct {
 	catalog *catalog.Catalog
 	kserve  *kserve.Client
@@ -118,6 +124,7 @@ type Handler struct {
 	jobs    jobManager
 	events  eventBus
 	queue   *queue.Producer
+	hfCache huggingFaceCache
 	opts    Options
 
 	catalogMu          sync.Mutex
@@ -127,7 +134,7 @@ type Handler struct {
 }
 
 // New creates a new Handler instance.
-func New(cat *catalog.Catalog, ks *kserve.Client, wm weightStore, vdisc discoveryService, val catalogValidator, writer catalogWriter, advisor recommendationService, dataStore *store.Store, jobMgr jobManager, evt eventBus, q *queue.Producer, opts Options) *Handler {
+func New(cat *catalog.Catalog, ks *kserve.Client, wm weightStore, vdisc discoveryService, val catalogValidator, writer catalogWriter, advisor recommendationService, dataStore *store.Store, jobMgr jobManager, evt eventBus, q *queue.Producer, hfCache huggingFaceCache, opts Options) *Handler {
 	if opts.CatalogTTL <= 0 {
 		opts.CatalogTTL = time.Minute
 	}
@@ -181,6 +188,7 @@ func New(cat *catalog.Catalog, ks *kserve.Client, wm weightStore, vdisc discover
 		jobs:               jobMgr,
 		events:             evt,
 		queue:              q,
+		hfCache:            hfCache,
 		opts:               opts,
 		lastCatalogRefresh: time.Time{},
 		catalogStatus:      "unknown",
@@ -1022,13 +1030,31 @@ func (h *Handler) SearchHuggingFace(c *gin.Context) {
 		Tags:           parseTags(c),
 	}
 
+	if opts.OnlyCompatible || h.hfCache == nil {
+		h.searchHuggingFaceLive(c, opts)
+		return
+	}
+
+	if models, err := h.hfCache.List(c.Request.Context()); err == nil && len(models) > 0 {
+		results := filterCachedHFModels(models, opts)
+		c.JSON(http.StatusOK, gin.H{"results": results})
+		return
+	}
+
+	h.searchHuggingFaceLive(c, opts)
+}
+
+func (h *Handler) searchHuggingFaceLive(c *gin.Context, opts vllm.SearchOptions) {
+	if h.vllm == nil {
+		c.JSON(http.StatusNotImplemented, gin.H{"error": "vLLM discovery is disabled"})
+		return
+	}
 	results, err := h.vllm.SearchModels(opts)
 	if err != nil {
 		log.Printf("Failed to search HuggingFace: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-
 	c.JSON(http.StatusOK, gin.H{"results": results})
 }
 
@@ -1513,6 +1539,128 @@ func filterHistory(entries []store.HistoryEntry, event, modelID string) []store.
 		result = append(result, entry)
 	}
 	return result
+}
+
+func filterCachedHFModels(models []vllm.HuggingFaceModel, opts vllm.SearchOptions) []vllm.HuggingFaceModel {
+	query := strings.ToLower(strings.TrimSpace(opts.Query))
+	filtered := make([]vllm.HuggingFaceModel, 0, len(models))
+	for _, model := range models {
+		if query != "" {
+			if !strings.Contains(strings.ToLower(model.ModelID), query) && !strings.Contains(strings.ToLower(model.ID), query) {
+				continue
+			}
+		}
+		if !hfOptionsMatch(&model, opts) {
+			continue
+		}
+		filtered = append(filtered, model)
+	}
+	sort.SliceStable(filtered, func(i, j int) bool {
+		return compareHFModels(filtered[i], filtered[j], opts)
+	})
+	if opts.Limit > 0 && len(filtered) > opts.Limit {
+		return filtered[:opts.Limit]
+	}
+	return filtered
+}
+
+func compareHFModels(a, b vllm.HuggingFaceModel, opts vllm.SearchOptions) bool {
+	direction := strings.ToLower(opts.Direction)
+	if direction == "" {
+		direction = "desc"
+	}
+	lessInt := func(x, y int) bool {
+		if direction == "asc" {
+			return x < y
+		}
+		return x > y
+	}
+
+	switch strings.ToLower(opts.Sort) {
+	case "likes":
+		if a.Likes == b.Likes {
+			return compareHFIdentifiers(a, b, direction)
+		}
+		return lessInt(a.Likes, b.Likes)
+	case "downloads", "":
+		if a.Downloads == b.Downloads {
+			return compareHFIdentifiers(a, b, direction)
+		}
+		return lessInt(a.Downloads, b.Downloads)
+	default:
+		return compareHFIdentifiers(a, b, direction)
+	}
+}
+
+func compareHFIdentifiers(a, b vllm.HuggingFaceModel, direction string) bool {
+	left := strings.ToLower(hfIdentifier(a))
+	right := strings.ToLower(hfIdentifier(b))
+	if direction == "asc" {
+		return left < right
+	}
+	return left > right
+}
+
+func hfIdentifier(model vllm.HuggingFaceModel) string {
+	if strings.TrimSpace(model.ModelID) != "" {
+		return model.ModelID
+	}
+	return model.ID
+}
+
+func hfOptionsMatch(model *vllm.HuggingFaceModel, opts vllm.SearchOptions) bool {
+	if model == nil {
+		return false
+	}
+	if opts.PipelineTag != "" && !strings.EqualFold(model.PipelineTag, opts.PipelineTag) {
+		return false
+	}
+	if opts.Author != "" && !strings.EqualFold(model.Author, opts.Author) {
+		return false
+	}
+	if opts.License != "" && !hfLicenseMatches(model, opts.License) {
+		return false
+	}
+	if len(opts.Tags) > 0 && !hfHasAllTags(model.Tags, opts.Tags) {
+		return false
+	}
+	return true
+}
+
+func hfHasAllTags(tags []string, required []string) bool {
+	if len(required) == 0 {
+		return true
+	}
+	set := make(map[string]struct{}, len(tags))
+	for _, tag := range tags {
+		set[strings.ToLower(tag)] = struct{}{}
+	}
+	for _, req := range required {
+		if _, ok := set[strings.ToLower(req)]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func hfLicenseMatches(model *vllm.HuggingFaceModel, license string) bool {
+	if model == nil || license == "" {
+		return true
+	}
+	target := strings.ToLower(license)
+	if model.Config != nil {
+		if value, ok := model.Config["license"].(string); ok && strings.EqualFold(value, license) {
+			return true
+		}
+	}
+	for _, tag := range model.Tags {
+		if strings.HasPrefix(strings.ToLower(tag), "license:") {
+			if strings.TrimPrefix(strings.ToLower(tag), "license:") == target {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func isNilInterface(value interface{}) bool {

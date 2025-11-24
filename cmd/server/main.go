@@ -16,6 +16,7 @@ import (
 	"github.com/oremus-labs/ol-model-manager/internal/catalogwriter"
 	"github.com/oremus-labs/ol-model-manager/internal/events"
 	"github.com/oremus-labs/ol-model-manager/internal/handlers"
+	"github.com/oremus-labs/ol-model-manager/internal/hfcache"
 	"github.com/oremus-labs/ol-model-manager/internal/jobs"
 	"github.com/oremus-labs/ol-model-manager/internal/kserve"
 	"github.com/oremus-labs/ol-model-manager/internal/kube"
@@ -32,7 +33,7 @@ import (
 )
 
 const (
-	version         = "0.4.15-go"
+	version         = "0.4.16-go"
 	shutdownTimeout = 5 * time.Second
 )
 
@@ -134,6 +135,14 @@ func main() {
 		Channel: cfg.EventsChannel,
 	})
 
+	hfCache := hfcache.New(hfcache.Options{
+		Store:    stateStore,
+		Redis:    redisClient,
+		Logger:   log.Default(),
+		TTL:      cfg.HuggingFaceCacheTTL,
+		KeySpace: "hf:models",
+	})
+
 	var jobQueue *queue.Producer
 	if redisClient != nil {
 		jobQueue = queue.NewProducer(redisClient, cfg.RedisJobStream)
@@ -189,7 +198,7 @@ func main() {
 	}
 
 	// Initialize handlers
-	h := handlers.New(cat, ksClient, weightManager, vllmDiscovery, catalogValidator, catWriter, advisor, stateStore, jobManager, eventBus, jobQueue, handlers.Options{
+	h := handlers.New(cat, ksClient, weightManager, vllmDiscovery, catalogValidator, catWriter, advisor, stateStore, jobManager, eventBus, jobQueue, hfCache, handlers.Options{
 		CatalogTTL:             cfg.CatalogRefreshInterval,
 		WeightsInstallTimeout:  cfg.WeightsInstallTimeout,
 		HuggingFaceToken:       cfg.HuggingFaceToken,
