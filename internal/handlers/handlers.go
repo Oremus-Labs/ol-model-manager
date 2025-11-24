@@ -256,6 +256,7 @@ func (h *Handler) StreamEvents(c *gin.Context) {
 			for _, job := range jobs {
 				c.SSEvent(fmt.Sprintf("job.%s", job.Status), job)
 			}
+			c.Writer.Flush()
 		}
 	}
 
