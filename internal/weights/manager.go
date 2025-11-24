@@ -3,8 +3,11 @@ package weights
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -51,6 +54,9 @@ type WeightInfo struct {
 	SizeHuman    string    `json:"sizeHuman"`
 	ModifiedTime time.Time `json:"modifiedTime"`
 	FileCount    int       `json:"fileCount"`
+	HFModelID    string    `json:"hfModelId,omitempty"`
+	Revision     string    `json:"revision,omitempty"`
+	InstalledAt  time.Time `json:"installedAt,omitempty"`
 }
 
 // StorageStats provides overall storage statistics.
@@ -63,6 +69,14 @@ type StorageStats struct {
 	AvailableHuman string       `json:"availableHuman"`
 	ModelCount     int          `json:"modelCount"`
 	Models         []WeightInfo `json:"models"`
+}
+
+const metadataFilename = ".model-manager"
+
+type weightMetadata struct {
+	ModelID     string    `json:"modelId"`
+	Revision    string    `json:"revision,omitempty"`
+	InstalledAt time.Time `json:"installedAt"`
 }
 
 // InstallOptions controls how weights are installed for a model.
@@ -96,28 +110,14 @@ func New(storagePath string, opts ...Option) *Manager {
 
 // List returns all cached model weights.
 func (m *Manager) List() ([]WeightInfo, error) {
-	if _, err := os.Stat(m.storagePath); os.IsNotExist(err) {
-		return []WeightInfo{}, nil
-	}
-
-	var weights []WeightInfo
-
-	entries, err := os.ReadDir(m.storagePath)
+	roots, err := m.installRoots()
 	if err != nil {
-		return nil, fmt.Errorf("failed to read storage directory: %w", err)
+		return nil, err
 	}
-
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-
-		if m.isReserved(entry.Name()) {
-			continue
-		}
-
-		modelPath := filepath.Join(m.storagePath, entry.Name())
-		info, err := m.getWeightInfo(modelPath, entry.Name())
+	weights := make([]WeightInfo, 0, len(roots))
+	for _, rel := range roots {
+		modelPath := filepath.Join(m.storagePath, toFilesystemPath(rel))
+		info, err := m.getWeightInfo(modelPath, rel)
 		if err != nil {
 			// Log but continue with other models
 			continue
@@ -134,29 +134,83 @@ func (m *Manager) List() ([]WeightInfo, error) {
 	return weights, nil
 }
 
+func (m *Manager) installRoots() ([]string, error) {
+	var roots []string
+
+	err := filepath.WalkDir(m.storagePath, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			if os.IsNotExist(err) {
+				return filepath.SkipDir
+			}
+			return err
+		}
+		if d.IsDir() || d.Name() != metadataFilename {
+			return nil
+		}
+		rel, err := filepath.Rel(m.storagePath, filepath.Dir(p))
+		if err != nil {
+			return nil
+		}
+		rel = filepath.ToSlash(rel)
+		if rel == "." || rel == "" {
+			return nil
+		}
+		roots = append(roots, rel)
+		return nil
+	})
+	if err != nil && !os.IsNotExist(err) {
+		return nil, err
+	}
+
+	if len(roots) == 0 {
+		entries, err := os.ReadDir(m.storagePath)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return []string{}, nil
+			}
+			return nil, fmt.Errorf("failed to read storage directory: %w", err)
+		}
+		for _, entry := range entries {
+			if entry.IsDir() && !m.isReserved(entry.Name()) {
+				roots = append(roots, entry.Name())
+			}
+		}
+	}
+
+	return roots, nil
+}
+
 // Get returns information about a specific model's weights.
 func (m *Manager) Get(modelName string) (*WeightInfo, error) {
-	if m.isReserved(modelName) {
-		return nil, fmt.Errorf("model weights not found: %s", modelName)
+	rel, err := normalizeRelativePath(modelName)
+	if err != nil {
+		return nil, fmt.Errorf("invalid model path: %w", err)
 	}
-	modelPath := filepath.Join(m.storagePath, modelName)
+	if m.isReserved(rel) {
+		return nil, fmt.Errorf("model weights not found: %s", rel)
+	}
+	modelPath := filepath.Join(m.storagePath, toFilesystemPath(rel))
 
 	if _, err := os.Stat(modelPath); os.IsNotExist(err) {
-		return nil, fmt.Errorf("model weights not found: %s", modelName)
+		return nil, fmt.Errorf("model weights not found: %s", rel)
 	}
 
-	return m.getWeightInfo(modelPath, modelName)
+	return m.getWeightInfo(modelPath, rel)
 }
 
 // Delete removes a model's weights from storage.
 func (m *Manager) Delete(modelName string) error {
-	if m.isReserved(modelName) {
-		return fmt.Errorf("model weights not found: %s", modelName)
+	rel, err := normalizeRelativePath(modelName)
+	if err != nil {
+		return fmt.Errorf("invalid model path: %w", err)
 	}
-	modelPath := filepath.Join(m.storagePath, modelName)
+	if m.isReserved(rel) {
+		return fmt.Errorf("model weights not found: %s", rel)
+	}
+	modelPath := filepath.Join(m.storagePath, toFilesystemPath(rel))
 
 	if _, err := os.Stat(modelPath); os.IsNotExist(err) {
-		return fmt.Errorf("model weights not found: %s", modelName)
+		return fmt.Errorf("model weights not found: %s", rel)
 	}
 
 	// Security check: ensure path is within storage directory
@@ -234,12 +288,9 @@ func (m *Manager) InstallFromHuggingFace(ctx context.Context, opts InstallOption
 		return nil, fmt.Errorf("no files specified for download")
 	}
 
-	target := opts.Target
-	if target == "" {
-		target = sanitizeName(opts.ModelID)
-	}
-	if target == "" {
-		return nil, fmt.Errorf("failed to derive target directory name")
+	target, err := CanonicalTarget(opts.ModelID, opts.Target)
+	if err != nil {
+		return nil, err
 	}
 
 	if m.isReserved(target) {
@@ -251,7 +302,7 @@ func (m *Manager) InstallFromHuggingFace(ctx context.Context, opts InstallOption
 		revision = "main"
 	}
 
-	destPath := filepath.Join(m.storagePath, target)
+	destPath := filepath.Join(m.storagePath, toFilesystemPath(target))
 	if _, err := os.Stat(destPath); err == nil {
 		if !opts.Overwrite {
 			return nil, fmt.Errorf("weights already exist for %s", target)
@@ -309,6 +360,15 @@ func (m *Manager) InstallFromHuggingFace(ctx context.Context, opts InstallOption
 		return nil, fmt.Errorf("failed to finalize weights: %w", err)
 	}
 
+	meta := weightMetadata{
+		ModelID:     opts.ModelID,
+		Revision:    revision,
+		InstalledAt: time.Now().UTC(),
+	}
+	if err := writeMetadata(destPath, meta); err != nil {
+		log.Printf("weights: failed to write metadata for %s: %v", target, err)
+	}
+
 	if opts.Progress != nil {
 		opts.Progress("", len(opts.Files), len(opts.Files))
 	}
@@ -325,11 +385,19 @@ func (m *Manager) isReserved(name string) bool {
 	if name == "" {
 		return true
 	}
-	if strings.HasPrefix(name, ".") {
-		return true
+	segments := strings.Split(strings.Trim(name, "/"), "/")
+	for _, segment := range segments {
+		if segment == "" {
+			return true
+		}
+		if strings.HasPrefix(segment, ".") {
+			return true
+		}
+		if _, ok := m.reservedNames[segment]; ok {
+			return true
+		}
 	}
-	_, ok := m.reservedNames[name]
-	return ok
+	return false
 }
 
 func (m *Manager) getWeightInfo(path, name string) (*WeightInfo, error) {
@@ -342,6 +410,9 @@ func (m *Manager) getWeightInfo(path, name string) (*WeightInfo, error) {
 			return err
 		}
 		if !info.IsDir() {
+			if info.Name() == metadataFilename {
+				return nil
+			}
 			totalSize += info.Size()
 			fileCount++
 			if info.ModTime().After(modTime) {
@@ -355,14 +426,22 @@ func (m *Manager) getWeightInfo(path, name string) (*WeightInfo, error) {
 		return nil, fmt.Errorf("failed to walk directory: %w", err)
 	}
 
-	return &WeightInfo{
+	info := &WeightInfo{
 		Path:         path,
 		Name:         name,
 		SizeBytes:    totalSize,
 		SizeHuman:    formatBytes(totalSize),
 		ModifiedTime: modTime,
 		FileCount:    fileCount,
-	}, nil
+	}
+
+	if meta, err := readMetadata(path); err == nil && meta != nil {
+		info.HFModelID = meta.ModelID
+		info.Revision = meta.Revision
+		info.InstalledAt = meta.InstalledAt
+	}
+
+	return info, nil
 }
 
 func formatBytes(bytes int64) string {
@@ -378,14 +457,51 @@ func formatBytes(bytes int64) string {
 	return fmt.Sprintf("%.1f %ciB", float64(bytes)/float64(div), "KMGTPE"[exp])
 }
 
-func sanitizeName(value string) string {
-	v := strings.ToLower(value)
-	v = strings.ReplaceAll(v, "/", "-")
-	v = strings.ReplaceAll(v, "_", "-")
-	v = strings.TrimSpace(v)
-	re := regexp.MustCompile(`-+`)
-	v = re.ReplaceAllString(v, "-")
-	return strings.Trim(v, "-")
+var segmentSanitizer = regexp.MustCompile(`[^A-Za-z0-9._-]+`)
+
+// CanonicalTarget derives a normalized relative path for a model installation.
+func CanonicalTarget(modelID, override string) (string, error) {
+	candidates := []string{override, modelID}
+	for _, candidate := range candidates {
+		if rel, err := normalizeRelativePath(candidate); err == nil && rel != "" {
+			return rel, nil
+		}
+	}
+	return "", fmt.Errorf("failed to derive target directory")
+}
+
+func normalizeRelativePath(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", fmt.Errorf("empty path")
+	}
+	raw = strings.ReplaceAll(raw, "\\", "/")
+	raw = strings.Trim(raw, "/")
+	if raw == "" {
+		return "", fmt.Errorf("empty path")
+	}
+	parts := strings.Split(raw, "/")
+	cleaned := make([]string, 0, len(parts))
+	for _, part := range parts {
+		seg := segmentSanitizer.ReplaceAllString(part, "-")
+		seg = strings.Trim(seg, "-")
+		if seg == "" || seg == "." || seg == ".." {
+			continue
+		}
+		cleaned = append(cleaned, seg)
+	}
+	if len(cleaned) == 0 {
+		return "", fmt.Errorf("invalid path %q", raw)
+	}
+	return strings.Join(cleaned, "/"), nil
+}
+
+func toFilesystemPath(rel string) string {
+	if rel == "" {
+		return rel
+	}
+	parts := strings.Split(rel, "/")
+	return filepath.Join(parts...)
 }
 
 func downloadFile(ctx context.Context, client *http.Client, url, destPath, token string) error {
@@ -435,4 +551,24 @@ func downloadFile(ctx context.Context, client *http.Client, url, destPath, token
 	}
 
 	return nil
+}
+
+func writeMetadata(dir string, meta weightMetadata) error {
+	data, err := json.Marshal(meta)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dir, metadataFilename), data, 0o644)
+}
+
+func readMetadata(dir string) (*weightMetadata, error) {
+	data, err := os.ReadFile(filepath.Join(dir, metadataFilename))
+	if err != nil {
+		return nil, err
+	}
+	var meta weightMetadata
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return nil, err
+	}
+	return &meta, nil
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"path"
 	"time"
 
 	"github.com/google/uuid"
@@ -14,9 +15,11 @@ import (
 
 // Manager coordinates asynchronous background work (e.g., weight installs).
 type Manager struct {
-	store   *store.Store
-	weights weightStore
-	hfToken string
+	store     *store.Store
+	weights   weightStore
+	hfToken   string
+	pvcName   string
+	modelRoot string
 }
 
 type weightStore interface {
@@ -24,11 +27,13 @@ type weightStore interface {
 }
 
 // New creates a job manager.
-func New(s *store.Store, w weightStore, hfToken string) *Manager {
+func New(s *store.Store, w weightStore, hfToken, pvcName, modelRoot string) *Manager {
 	return &Manager{
-		store:   s,
-		weights: w,
-		hfToken: hfToken,
+		store:     s,
+		weights:   w,
+		hfToken:   hfToken,
+		pvcName:   pvcName,
+		modelRoot: modelRoot,
 	}
 }
 
@@ -101,11 +106,18 @@ func (m *Manager) runInstall(job *store.Job, req InstallRequest) {
 	}
 
 	job.Error = ""
-	job.Result = map[string]interface{}{
+	result := map[string]interface{}{
 		"path":      info.Path,
 		"name":      info.Name,
 		"sizeBytes": info.SizeBytes,
 	}
+	if storageURI := m.storageURI(info.Name); storageURI != "" {
+		result["storageUri"] = storageURI
+	}
+	if inferencePath := m.inferencePath(info.Name); inferencePath != "" {
+		result["inferenceModelPath"] = inferencePath
+	}
+	job.Result = result
 	m.updateJob(job, store.JobDone, 100, "completed", "Weights ready")
 
 	m.appendHistory(job.ID, "weight_install_completed", req.ModelID, job.Result)
@@ -142,4 +154,18 @@ func (m *Manager) appendHistory(id, event, modelID string, meta map[string]inter
 		ModelID:  modelID,
 		Metadata: meta,
 	})
+}
+
+func (m *Manager) storageURI(name string) string {
+	if m.pvcName == "" || name == "" {
+		return ""
+	}
+	return fmt.Sprintf("pvc://%s/%s", m.pvcName, name)
+}
+
+func (m *Manager) inferencePath(name string) string {
+	if m.modelRoot == "" || name == "" {
+		return ""
+	}
+	return path.Join(m.modelRoot, name)
 }

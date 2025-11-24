@@ -34,7 +34,7 @@ import (
 )
 
 const (
-	version         = "0.4.9-go"
+	version         = "0.4.10-go"
 	shutdownTimeout = 5 * time.Second
 )
 
@@ -125,7 +125,7 @@ func main() {
 		}
 	}
 
-	jobManager := jobs.New(stateStore, weightManager, cfg.HuggingFaceToken)
+	jobManager := jobs.New(stateStore, weightManager, cfg.HuggingFaceToken, cfg.WeightsPVCName, cfg.InferenceModelRoot)
 
 	// Initialize catalog validator
 	catalogValidator, err := validator.New(validator.Options{
@@ -259,7 +259,7 @@ func setupRouter(h *handlers.Handler, apiToken string) *gin.Engine {
 	// Weight endpoints
 	router.GET("/weights", h.ListWeights)
 	router.GET("/weights/usage", h.GetWeightUsage)
-	router.GET("/weights/:name/info", h.GetWeightInfo)
+	router.GET("/weights/info", h.GetWeightInfo)
 
 	// HuggingFace discovery
 	router.GET("/huggingface/search", h.SearchHuggingFace)
@@ -281,7 +281,7 @@ func setupRouter(h *handlers.Handler, apiToken string) *gin.Engine {
 	protected.POST("/catalog/validate", h.ValidateCatalog)
 	protected.POST("/catalog/pr", h.CreateCatalogPR)
 	protected.POST("/weights/install", h.InstallWeights)
-	protected.DELETE("/weights/:name", h.DeleteWeights)
+	protected.DELETE("/weights", h.DeleteWeights)
 	protected.GET("/weights/install/status/:id", h.GetJob)
 	protected.GET("/jobs", h.ListJobs)
 	protected.GET("/jobs/:id", h.GetJob)

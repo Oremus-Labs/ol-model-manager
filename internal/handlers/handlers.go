@@ -185,6 +185,10 @@ type installWeightsRequest struct {
 	Overwrite bool     `json:"overwrite"`
 }
 
+type deleteWeightsRequest struct {
+	Name string `json:"name" binding:"required"`
+}
+
 type modelInfoRequest struct {
 	HFModelID  string `json:"hfModelId" binding:"required"`
 	AutoDetect bool   `json:"autoDetect"`
@@ -330,7 +334,7 @@ func (h *Handler) ListModels(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, h.catalog.List())
+	c.JSON(http.StatusOK, h.catalog.All())
 }
 
 // GetModel returns details for a specific model.
@@ -452,7 +456,7 @@ func (h *Handler) RefreshCatalog(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"status":  "success",
 		"message": "Catalog refreshed",
-		"models":  h.catalog.List(),
+		"models":  h.catalog.All(),
 	})
 }
 
@@ -551,7 +555,12 @@ func (h *Handler) GetWeightInfo(c *gin.Context) {
 		return
 	}
 
-	name := c.Param("name")
+	name := strings.Trim(c.Query("name"), "/")
+	if name == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "name is required"})
+		return
+	}
+
 	info, err := h.weights.Get(name)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
@@ -568,18 +577,23 @@ func (h *Handler) DeleteWeights(c *gin.Context) {
 		return
 	}
 
-	name := c.Param("name")
-	if err := h.weights.Delete(name); err != nil {
+	var req deleteWeightsRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	if err := h.weights.Delete(req.Name); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"status":  "success",
-		"message": "Deleted weights for " + name,
+		"message": "Deleted weights for " + req.Name,
 	})
 
-	h.recordHistory("weight_deleted", name, nil)
+	h.recordHistory("weight_deleted", req.Name, nil)
 }
 
 // GetWeightUsage returns PVC usage statistics.
@@ -612,6 +626,13 @@ func (h *Handler) InstallWeights(c *gin.Context) {
 		return
 	}
 
+	targetName, err := weights.CanonicalTarget(req.HFModelID, req.Target)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	req.Target = targetName
+
 	hfModel, err := h.fetchAndValidateHFModel(req.HFModelID)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -627,6 +648,12 @@ func (h *Handler) InstallWeights(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "no downloadable files found for model"})
 		return
 	}
+
+	storageURI := ""
+	if h.opts.WeightsPVCName != "" {
+		storageURI = fmt.Sprintf("pvc://%s/%s", h.opts.WeightsPVCName, targetName)
+	}
+	inferencePath := path.Join(h.opts.InferenceModelRoot, targetName)
 
 	if h.jobs != nil {
 		job, err := h.jobs.EnqueueWeightInstall(jobs.InstallRequest{
@@ -646,6 +673,9 @@ func (h *Handler) InstallWeights(c *gin.Context) {
 			"job":                  job,
 			"jobUrl":               fmt.Sprintf("/jobs/%s", job.ID),
 			"weightsInstallStatus": fmt.Sprintf("/weights/install/status/%s", job.ID),
+			"target":               targetName,
+			"storageUri":           storageURI,
+			"inferenceModelPath":   inferencePath,
 		})
 		return
 	}
@@ -667,7 +697,7 @@ func (h *Handler) InstallWeights(c *gin.Context) {
 		return
 	}
 
-	storageURI := ""
+	storageURI = ""
 	if h.opts.WeightsPVCName != "" {
 		storageURI = fmt.Sprintf("pvc://%s/%s", h.opts.WeightsPVCName, info.Name)
 	}
@@ -685,7 +715,11 @@ func (h *Handler) InstallWeights(c *gin.Context) {
 	}
 
 	h.recordHistory("weight_install_completed", req.HFModelID, map[string]interface{}{
-		"target": info.Name,
+		"target":      info.Name,
+		"storageUri":  storageURI,
+		"modelPath":   modelPath,
+		"sizeBytes":   info.SizeBytes,
+		"installedAt": info.InstalledAt,
 	})
 
 	c.JSON(http.StatusOK, response)

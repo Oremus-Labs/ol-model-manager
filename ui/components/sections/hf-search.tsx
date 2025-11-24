@@ -55,7 +55,7 @@ export function HuggingFaceSearch({ query, results }: Props) {
 
 function SearchResultCard({ insight }: { insight: ModelInsight }) {
   const modelId = insight.huggingFace.modelId ?? insight.huggingFace.id;
-  const defaultTarget = slugifyModel(modelId);
+  const defaultTarget = insight.huggingFace.id || slugifyModel(modelId);
 
   return (
     <article className="rounded-2xl border border-white/5 bg-slate-900/30 p-4 shadow-card">
@@ -76,7 +76,7 @@ function SearchResultCard({ insight }: { insight: ModelInsight }) {
           <input type="hidden" name="hfModelId" value={modelId} />
           <input type="hidden" name="target" value={defaultTarget} />
           <p className="text-xs text-emerald-200">
-            Default target <span className="font-mono">{defaultTarget}</span> on /mnt/models using the cluster API token.
+            Default target <span className="font-mono">{defaultTarget}</span> inside /mnt/models using the cluster API token.
           </p>
           <button
             type="submit"

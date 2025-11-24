@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -27,13 +28,12 @@ func TestInstallFromHuggingFaceDownloadsFiles(t *testing.T) {
 	info, err := manager.InstallFromHuggingFace(context.Background(), InstallOptions{
 		ModelID: "Qwen/Qwen2.5-0.5B",
 		Files:   []string{"model.safetensors"},
-		Target:  "qwen2.5-0.5b",
 	})
 	if err != nil {
 		t.Fatalf("InstallFromHuggingFace() error = %v", err)
 	}
 
-	expectedPath := filepath.Join(tmpDir, "qwen2.5-0.5b", "model.safetensors")
+	expectedPath := filepath.Join(tmpDir, "Qwen", "Qwen2.5-0.5B", "model.safetensors")
 	data, err := os.ReadFile(expectedPath)
 	if err != nil {
 		t.Fatalf("failed to read downloaded file: %v", err)
@@ -43,8 +43,8 @@ func TestInstallFromHuggingFaceDownloadsFiles(t *testing.T) {
 		t.Fatalf("unexpected file contents %q", string(data))
 	}
 
-	if info.Name != "qwen2.5-0.5b" {
-		t.Fatalf("expected info.Name qwen2.5-0.5b, got %s", info.Name)
+	if info.Name != "Qwen/Qwen2.5-0.5B" {
+		t.Fatalf("expected info.Name Qwen/Qwen2.5-0.5B, got %s", info.Name)
 	}
 
 	if info.SizeBytes != int64(len("tiny-model")) {
@@ -61,7 +61,7 @@ func TestListSkipsReservedAndHiddenDirs(t *testing.T) {
 		name string
 		file string
 	}{
-		{"qwen2.5-0.5b", "model.safetensors"},
+		{"Qwen/Qwen2.5-0.5B", "model.safetensors"},
 		{".hf-cache", "cache.bin"},
 		{"modules", "readme.txt"},
 	}
@@ -73,6 +73,12 @@ func TestListSkipsReservedAndHiddenDirs(t *testing.T) {
 		}
 		if err := os.WriteFile(filepath.Join(dirPath, d.file), []byte("data"), 0o644); err != nil {
 			t.Fatalf("write file: %v", err)
+		}
+		if strings.Contains(d.name, "/") {
+			meta := filepath.Join(dirPath, metadataFilename)
+			if err := os.WriteFile(meta, []byte(`{"modelId":"`+d.name+`"}`), 0o644); err != nil {
+				t.Fatalf("write metadata: %v", err)
+			}
 		}
 	}
 
@@ -87,7 +93,7 @@ func TestListSkipsReservedAndHiddenDirs(t *testing.T) {
 		t.Fatalf("expected 1 entry, got %d: %+v", len(list), list)
 	}
 
-	if list[0].Name != "qwen2.5-0.5b" {
+	if list[0].Name != "Qwen/Qwen2.5-0.5B" {
 		t.Fatalf("unexpected entry %+v", list[0])
 	}
 

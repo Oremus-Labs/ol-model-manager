@@ -1,7 +1,6 @@
 import type { ModelInsight } from '@/lib/types';
 import { SystemOverview } from '@/components/sections/system-overview';
 import { Section } from '@/components/layout/section';
-import { InstallWeightsForm } from '@/components/forms/install-weights-form';
 import { ModelsPanel } from '@/components/sections/models-panel';
 import { WeightsPanel } from '@/components/sections/weights-panel';
 import { JobsPanel } from '@/components/sections/jobs-panel';
@@ -9,6 +8,7 @@ import { HistoryPanel } from '@/components/sections/history-panel';
 import { QuickActions } from '@/components/sections/quick-actions';
 import { HuggingFaceSearch } from '@/components/sections/hf-search';
 import { TopBar } from '@/components/layout/topbar';
+import { ActiveModelPanel } from '@/components/sections/active-model-panel';
 import { getActiveService, getHistory, getJobs, getModels, getSystemInfo, getWeights, searchHuggingFace } from '@/lib/api';
 
 export const dynamic = 'force-dynamic';
@@ -46,18 +46,14 @@ export default async function Page({ searchParams }: PageProps) {
 
       <TopBar activeService={activeService} models={models} jobs={jobs} history={history} />
 
+      <Section title="Active deployment" description="Live readiness from the Knative service" id="active">
+        <ActiveModelPanel service={activeService} models={models} />
+      </Section>
+
       <QuickActions />
 
       <Section title="System Overview" description="Live telemetry from the Model Manager API" id="system">
         <SystemOverview data={systemInfo} />
-      </Section>
-
-      <Section
-        title="Install new weights"
-        description="Pre-stage Hugging Face models on the Venus PVC to dodge cold starts"
-        id="weights"
-      >
-        <InstallWeightsForm />
       </Section>
 
       <Section title="Hugging Face search" description="Find repos and inspect metadata before staging weights" id="discover">

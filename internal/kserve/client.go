@@ -85,15 +85,19 @@ func (c *Client) Activate(model *catalog.Model) (*Result, error) {
 	ctx := context.Background()
 
 	// Check if InferenceService exists
-	_, err := c.client.Resource(c.gvr).Namespace(c.namespace).Get(ctx, c.isvcName, metav1.GetOptions{})
+	existing, err := c.client.Resource(c.gvr).Namespace(c.namespace).Get(ctx, c.isvcName, metav1.GetOptions{})
 	if err == nil {
 		// Update existing
 		log.Printf("Updating existing InferenceService: %s", c.isvcName)
+		isvc.SetResourceVersion(existing.GetResourceVersion())
 		_, err = c.client.Resource(c.gvr).Namespace(c.namespace).Update(ctx, isvc, metav1.UpdateOptions{})
 		if err != nil {
 			return nil, fmt.Errorf("failed to update InferenceService: %w", err)
 		}
 		return &Result{Action: "updated", Name: c.isvcName}, nil
+	}
+	if !apierrors.IsNotFound(err) {
+		return nil, fmt.Errorf("failed to get InferenceService: %w", err)
 	}
 
 	// Create new

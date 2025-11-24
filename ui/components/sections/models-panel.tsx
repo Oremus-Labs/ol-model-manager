@@ -25,8 +25,15 @@ export function ModelsPanel({ models }: Props) {
           <div className="mt-4 grid gap-2 text-sm text-slate-300">
             <p>
               <span className="text-slate-400">Storage URI:</span>{' '}
-              {model.storageUri ?? 'hf://'}
+              <span className={model.storageUri ? 'font-mono text-emerald-200' : 'text-amber-200'}>
+                {model.storageUri ?? (model.hfModelId ? `hf://${model.hfModelId}` : 'not set')}
+              </span>
             </p>
+            {!model.storageUri && (
+              <p className="text-xs text-amber-300">
+                This model will download directly from Hugging Face until you set a PVC storageUri and preinstall the weights.
+              </p>
+            )}
             {model.resources && (
               <p>
                 <span className="text-slate-400">Resources:</span>{' '}

@@ -1,6 +1,8 @@
 import { API_BASE_URL } from './config';
 import type { ActiveService, Architecture, HistoryEntry, Job, Model, ModelInsight, SystemInfo, WeightInfo } from './types';
 
+const API_TOKEN = process.env.MODEL_MANAGER_API_TOKEN;
+
 type JSONValue = Record<string, unknown>;
 
 async function fetchJSON<T>(path: string, init?: RequestInit): Promise<T | null> {
@@ -8,10 +10,7 @@ async function fetchJSON<T>(path: string, init?: RequestInit): Promise<T | null>
     const res = await fetch(`${API_BASE_URL}${path}`, {
       ...init,
       cache: 'no-store',
-      headers: {
-        Accept: 'application/json',
-        ...(init?.headers || {}),
-      },
+      headers: buildHeaders(init?.headers),
     });
     if (!res.ok) {
       console.error('fetch failed', path, res.status);
@@ -22,6 +21,15 @@ async function fetchJSON<T>(path: string, init?: RequestInit): Promise<T | null>
     console.error('fetch error', path, err);
     return null;
   }
+}
+
+function buildHeaders(extra?: HeadersInit): Headers {
+  const headers = new Headers(extra);
+  headers.set('Accept', 'application/json');
+  if (API_TOKEN) {
+    headers.set('Authorization', `Bearer ${API_TOKEN}`);
+  }
+  return headers;
 }
 
 export async function getSystemInfo(): Promise<SystemInfo | null> {

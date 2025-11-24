@@ -62,8 +62,10 @@ export async function deleteWeightsAction(_: ActionState, formData: FormData): P
     if (!name) {
       return { ok: false, message: 'Weight directory required' };
     }
-    await authorizedFetch(`/weights/${encodeURIComponent(name)}`, {
+    await authorizedFetch(`/weights`, {
       method: 'DELETE',
+      body: JSON.stringify({ name }),
+      headers: { 'Content-Type': 'application/json' },
     });
     revalidatePath('/');
     return { ok: true, message: `Deleted ${name}` };

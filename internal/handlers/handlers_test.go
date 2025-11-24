@@ -30,7 +30,7 @@ func TestListWeights(t *testing.T) {
 
 	store := &fakeWeightStore{
 		listResp: []weights.WeightInfo{{
-			Name:      "qwen2.5-0.5b",
+			Name:      "Qwen/Qwen2.5-0.5B",
 			SizeBytes: 1234,
 		}},
 	}
@@ -55,7 +55,7 @@ func TestListWeights(t *testing.T) {
 		t.Fatalf("failed to decode response: %v", err)
 	}
 
-	if len(body.Weights) != 1 || body.Weights[0].Name != "qwen2.5-0.5b" {
+	if len(body.Weights) != 1 || body.Weights[0].Name != "Qwen/Qwen2.5-0.5B" {
 		t.Fatalf("unexpected weights payload: %+v", body)
 	}
 }
@@ -65,7 +65,7 @@ func TestInstallWeightsDerivesFilesFromHuggingFace(t *testing.T) {
 
 	store := &fakeWeightStore{
 		installResp: &weights.WeightInfo{
-			Name: "qwen2.5-0.5b",
+			Name: "Qwen/Qwen2.5-0.5B",
 		},
 	}
 
@@ -101,11 +101,11 @@ func TestInstallWeightsDerivesFilesFromHuggingFace(t *testing.T) {
 		t.Fatalf("failed to decode response: %v", err)
 	}
 
-	if body["storageUri"] != "pvc://venus-model-storage/qwen2.5-0.5b" {
+	if body["storageUri"] != "pvc://venus-model-storage/Qwen/Qwen2.5-0.5B" {
 		t.Fatalf("storageUri mismatch: %v", body["storageUri"])
 	}
 
-	if body["inferenceModelPath"] != "/mnt/models/qwen2.5-0.5b" {
+	if body["inferenceModelPath"] != "/mnt/models/Qwen/Qwen2.5-0.5B" {
 		t.Fatalf("inferenceModelPath mismatch: %v", body["inferenceModelPath"])
 	}
 
