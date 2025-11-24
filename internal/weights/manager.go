@@ -232,6 +232,8 @@ func (m *Manager) Delete(modelName string) error {
 		return fmt.Errorf("failed to delete model weights: %w", err)
 	}
 
+	m.cleanupEmptyParents(modelPath)
+
 	return nil
 }
 
@@ -571,4 +573,32 @@ func readMetadata(dir string) (*weightMetadata, error) {
 		return nil, err
 	}
 	return &meta, nil
+}
+
+func (m *Manager) cleanupEmptyParents(modelPath string) {
+	absStorage, err := filepath.Abs(m.storagePath)
+	if err != nil {
+		return
+	}
+	current := filepath.Dir(modelPath)
+	for {
+		absCurrent, err := filepath.Abs(current)
+		if err != nil {
+			return
+		}
+		if !strings.HasPrefix(absCurrent, absStorage) || absCurrent == absStorage {
+			return
+		}
+		entries, err := os.ReadDir(current)
+		if err != nil {
+			return
+		}
+		if len(entries) > 0 {
+			return
+		}
+		if err := os.Remove(current); err != nil {
+			return
+		}
+		current = filepath.Dir(current)
+	}
 }
