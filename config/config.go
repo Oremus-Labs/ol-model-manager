@@ -39,15 +39,18 @@ type Config struct {
 	StatePath          string
 
 	// Persistence + cache configuration
-	DataStoreDriver         string
-	DataStoreDSN            string
-	DatabasePVCName         string
-	HuggingFaceCacheTTL     time.Duration
-	HuggingFaceSyncInterval time.Duration
-	VLLMCacheTTL            time.Duration
-	RecommendationCacheTTL  time.Duration
-	GPUInventorySource      string
-	PVCAlertThreshold       float64
+	DataStoreDriver             string
+	DataStoreDSN                string
+	DatabasePVCName             string
+	HuggingFaceCacheTTL         time.Duration
+	HuggingFaceSyncInterval     time.Duration
+	VLLMCacheTTL                time.Duration
+	RecommendationCacheTTL      time.Duration
+	GPUInventorySource          string
+	PVCAlertThreshold           float64
+	HuggingFaceSyncPipelineTags []string
+	HuggingFaceSyncSearchTerms  []string
+	HuggingFaceSyncLimit        int
 
 	// Redis / events configuration
 	RedisAddr        string
@@ -111,21 +114,36 @@ func Load() *Config {
 		RecommendationCacheTTL:  getEnvDuration("RECOMMENDATION_CACHE_TTL", 15*time.Minute),
 		GPUInventorySource:      getEnv("GPU_INVENTORY_SOURCE", "k8s-nodes"),
 		PVCAlertThreshold:       getEnvFloat("PVC_ALERT_THRESHOLD", 0.85),
-		RedisAddr:               getEnv("REDIS_ADDR", ""),
-		RedisUsername:           getEnv("REDIS_USERNAME", ""),
-		RedisPassword:           os.Getenv("REDIS_PASSWORD"),
-		RedisDB:                 getEnvInt("REDIS_DB", 0),
-		RedisTLSEnabled:         getEnvBool("REDIS_TLS_ENABLED", false),
-		RedisTLSInsecure:        getEnvBool("REDIS_TLS_INSECURE_SKIP_VERIFY", false),
-		EventsChannel:           getEnv("EVENTS_CHANNEL", "model-manager-events"),
-		RedisJobStream:          getEnv("REDIS_JOB_STREAM", "model-manager:jobs"),
-		RedisJobGroup:           getEnv("REDIS_JOB_GROUP", "weights-workers"),
-		HuggingFaceToken:        os.Getenv("HUGGINGFACE_API_TOKEN"),
-		GitHubToken:             os.Getenv("GITHUB_TOKEN"),
-		GitAuthorName:           getEnv("GIT_AUTHOR_NAME", ""),
-		GitAuthorEmail:          getEnv("GIT_AUTHOR_EMAIL", ""),
-		APIToken:                os.Getenv("MODEL_MANAGER_API_TOKEN"),
-		SlackWebhookURL:         os.Getenv("SLACK_WEBHOOK_URL"),
+		HuggingFaceSyncPipelineTags: getEnvList("HUGGINGFACE_SYNC_PIPELINE_TAGS", []string{
+			"text-generation",
+			"text2text-generation",
+			"summarization",
+			"question-answering",
+			"translation",
+		}),
+		HuggingFaceSyncSearchTerms: getEnvList("HUGGINGFACE_SYNC_SEARCH_TERMS", []string{
+			"llama",
+			"qwen",
+			"mistral",
+			"phi",
+			"deepseek",
+		}),
+		HuggingFaceSyncLimit: getEnvInt("HUGGINGFACE_SYNC_LIMIT", 50),
+		RedisAddr:            getEnv("REDIS_ADDR", ""),
+		RedisUsername:        getEnv("REDIS_USERNAME", ""),
+		RedisPassword:        os.Getenv("REDIS_PASSWORD"),
+		RedisDB:              getEnvInt("REDIS_DB", 0),
+		RedisTLSEnabled:      getEnvBool("REDIS_TLS_ENABLED", false),
+		RedisTLSInsecure:     getEnvBool("REDIS_TLS_INSECURE_SKIP_VERIFY", false),
+		EventsChannel:        getEnv("EVENTS_CHANNEL", "model-manager-events"),
+		RedisJobStream:       getEnv("REDIS_JOB_STREAM", "model-manager:jobs"),
+		RedisJobGroup:        getEnv("REDIS_JOB_GROUP", "weights-workers"),
+		HuggingFaceToken:     os.Getenv("HUGGINGFACE_API_TOKEN"),
+		GitHubToken:          os.Getenv("GITHUB_TOKEN"),
+		GitAuthorName:        getEnv("GIT_AUTHOR_NAME", ""),
+		GitAuthorEmail:       getEnv("GIT_AUTHOR_EMAIL", ""),
+		APIToken:             os.Getenv("MODEL_MANAGER_API_TOKEN"),
+		SlackWebhookURL:      os.Getenv("SLACK_WEBHOOK_URL"),
 	}
 }
 
@@ -178,4 +196,23 @@ func getEnvBool(key string, defaultValue bool) bool {
 		}
 	}
 	return defaultValue
+}
+
+func getEnvList(key string, defaultValue []string) []string {
+	value := os.Getenv(key)
+	if value == "" {
+		return defaultValue
+	}
+	raw := strings.Split(value, ",")
+	list := make([]string, 0, len(raw))
+	for _, item := range raw {
+		item = strings.TrimSpace(item)
+		if item != "" {
+			list = append(list, item)
+		}
+	}
+	if len(list) == 0 {
+		return defaultValue
+	}
+	return list
 }

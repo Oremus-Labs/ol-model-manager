@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/oremus-labs/ol-model-manager/config"
@@ -17,7 +18,7 @@ import (
 	"github.com/oremus-labs/ol-model-manager/internal/vllm"
 )
 
-const syncVersion = "0.4.16-go"
+const syncVersion = "0.4.17-go"
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
@@ -75,6 +76,7 @@ func main() {
 		EventBus:  eventBus,
 		Logger:    log.Default(),
 		Interval:  cfg.HuggingFaceSyncInterval,
+		Queries:   buildSyncQueries(cfg),
 	})
 
 	if err := service.Run(ctx); err != nil && err != context.Canceled {
@@ -82,4 +84,53 @@ func main() {
 		os.Exit(1)
 	}
 	log.Println("sync service exited cleanly")
+}
+
+func buildSyncQueries(cfg *config.Config) []vllm.SearchOptions {
+	limit := cfg.HuggingFaceSyncLimit
+	if limit <= 0 || limit > 50 {
+		limit = 50
+	}
+	seen := make(map[string]struct{})
+	var queries []vllm.SearchOptions
+
+	appendQuery := func(key string, opt vllm.SearchOptions) {
+		if _, ok := seen[key]; ok {
+			return
+		}
+		opt.Limit = limit
+		seen[key] = struct{}{}
+		queries = append(queries, opt)
+	}
+
+	appendQuery("global", vllm.SearchOptions{
+		Sort:      "downloads",
+		Direction: "-1",
+	})
+
+	for _, tag := range cfg.HuggingFaceSyncPipelineTags {
+		tag = strings.TrimSpace(tag)
+		if tag == "" {
+			continue
+		}
+		appendQuery("pipeline:"+tag, vllm.SearchOptions{
+			PipelineTag: tag,
+			Sort:        "downloads",
+			Direction:   "-1",
+		})
+	}
+
+	for _, term := range cfg.HuggingFaceSyncSearchTerms {
+		term = strings.TrimSpace(term)
+		if term == "" {
+			continue
+		}
+		appendQuery("query:"+strings.ToLower(term), vllm.SearchOptions{
+			Query:     term,
+			Sort:      "downloads",
+			Direction: "-1",
+		})
+	}
+
+	return queries
 }
