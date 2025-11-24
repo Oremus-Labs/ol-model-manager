@@ -39,6 +39,7 @@ func NewServer(handler *handlers.Handler, opts Options) *Server {
 	engine.GET("/models/:id", handler.GetModel)
 	engine.GET("/models/:id/compatibility", handler.ModelCompatibility)
 	engine.GET("/models/:id/manifest", handler.GetModelManifest)
+	engine.GET("/models/status", handler.GetRuntimeStatus)
 	engine.GET("/active", handler.GetActiveModel)
 	engine.POST("/catalog/generate", handler.GenerateCatalogEntry)
 	engine.GET("/recommendations/:gpuType", handler.GPURecommendations)

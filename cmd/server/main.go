@@ -23,6 +23,7 @@ import (
 	"github.com/oremus-labs/ol-model-manager/internal/queue"
 	"github.com/oremus-labs/ol-model-manager/internal/recommendations"
 	"github.com/oremus-labs/ol-model-manager/internal/redisx"
+	"github.com/oremus-labs/ol-model-manager/internal/status"
 	"github.com/oremus-labs/ol-model-manager/internal/store"
 	"github.com/oremus-labs/ol-model-manager/internal/validator"
 	"github.com/oremus-labs/ol-model-manager/internal/vllm"
@@ -33,7 +34,7 @@ import (
 )
 
 const (
-	version         = "0.4.17-go"
+	version         = "0.4.18-go"
 	shutdownTimeout = 5 * time.Second
 )
 
@@ -135,6 +136,19 @@ func main() {
 		Channel: cfg.EventsChannel,
 	})
 
+	var runtimeStatus status.Provider
+	statusManager, err := status.NewManager(kubeConfig, cfg.Namespace, cfg.InferenceServiceName, eventBus)
+	if err != nil {
+		log.Printf("Failed to initialize runtime status manager: %v", err)
+	} else {
+		runtimeStatus = statusManager
+		go func() {
+			if err := statusManager.Run(rootCtx); err != nil && err != context.Canceled {
+				log.Printf("Status manager exited: %v", err)
+			}
+		}()
+	}
+
 	hfCache := hfcache.New(hfcache.Options{
 		Store:    stateStore,
 		Redis:    redisClient,
@@ -198,7 +212,7 @@ func main() {
 	}
 
 	// Initialize handlers
-	h := handlers.New(cat, ksClient, weightManager, vllmDiscovery, catalogValidator, catWriter, advisor, stateStore, jobManager, eventBus, jobQueue, hfCache, handlers.Options{
+	h := handlers.New(cat, ksClient, weightManager, vllmDiscovery, catalogValidator, catWriter, advisor, stateStore, jobManager, eventBus, jobQueue, hfCache, runtimeStatus, handlers.Options{
 		CatalogTTL:             cfg.CatalogRefreshInterval,
 		WeightsInstallTimeout:  cfg.WeightsInstallTimeout,
 		HuggingFaceToken:       cfg.HuggingFaceToken,

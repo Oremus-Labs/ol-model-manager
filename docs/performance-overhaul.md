@@ -96,6 +96,11 @@ Deployment/Argo
 No new image necessary unless code changed: rebuild/push 0.X.3, update Helm with new env if needed.
 argocd app sync ...
 Verify: kubectl logs deploy/model-manager-api | grep informer, ensure events fire when scaling an InferenceService.
+
+**Verification – 2025-11-24**
+- Added `internal/status.Manager` which watches the active InferenceService + labeled Deployments/Pods and emits `model.status.updated` SSE events whenever readiness changes.
+- New `/models/status` endpoint serves the cached snapshot instantly; `curl https://model-manager-api.oremuslabs.app/models/status` now reports the ISVC URL, deployment replica counts, and pod readiness.
+- `kubectl logs deploy/model-manager-sync` and `deploy/model-manager-api` show the informers starting up, and `timeout 5s curl -Ns …/events` includes live `model.status.updated` payloads when pods cycle.
 Phase 4 – UI/client integration hooks
 REST+WS contract
 

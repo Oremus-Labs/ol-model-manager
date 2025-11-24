@@ -28,6 +28,7 @@ import (
 	"github.com/oremus-labs/ol-model-manager/internal/openapi"
 	"github.com/oremus-labs/ol-model-manager/internal/queue"
 	"github.com/oremus-labs/ol-model-manager/internal/recommendations"
+	"github.com/oremus-labs/ol-model-manager/internal/status"
 	"github.com/oremus-labs/ol-model-manager/internal/store"
 	"github.com/oremus-labs/ol-model-manager/internal/validator"
 	"github.com/oremus-labs/ol-model-manager/internal/vllm"
@@ -112,6 +113,10 @@ type huggingFaceCache interface {
 	Get(context.Context, string) (*vllm.HuggingFaceModel, error)
 }
 
+type runtimeStatusProvider interface {
+	CurrentStatus() status.RuntimeStatus
+}
+
 type Handler struct {
 	catalog *catalog.Catalog
 	kserve  *kserve.Client
@@ -125,6 +130,7 @@ type Handler struct {
 	events  eventBus
 	queue   *queue.Producer
 	hfCache huggingFaceCache
+	runtime runtimeStatusProvider
 	opts    Options
 
 	catalogMu          sync.Mutex
@@ -134,7 +140,7 @@ type Handler struct {
 }
 
 // New creates a new Handler instance.
-func New(cat *catalog.Catalog, ks *kserve.Client, wm weightStore, vdisc discoveryService, val catalogValidator, writer catalogWriter, advisor recommendationService, dataStore *store.Store, jobMgr jobManager, evt eventBus, q *queue.Producer, hfCache huggingFaceCache, opts Options) *Handler {
+func New(cat *catalog.Catalog, ks *kserve.Client, wm weightStore, vdisc discoveryService, val catalogValidator, writer catalogWriter, advisor recommendationService, dataStore *store.Store, jobMgr jobManager, evt eventBus, q *queue.Producer, hfCache huggingFaceCache, runtime runtimeStatusProvider, opts Options) *Handler {
 	if opts.CatalogTTL <= 0 {
 		opts.CatalogTTL = time.Minute
 	}
@@ -189,6 +195,7 @@ func New(cat *catalog.Catalog, ks *kserve.Client, wm weightStore, vdisc discover
 		events:             evt,
 		queue:              q,
 		hfCache:            hfCache,
+		runtime:            runtime,
 		opts:               opts,
 		lastCatalogRefresh: time.Time{},
 		catalogStatus:      "unknown",
@@ -636,6 +643,19 @@ func (h *Handler) TestModel(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, response)
+}
+
+// GetRuntimeStatus returns the cached KServe/Knative runtime status.
+func (h *Handler) GetRuntimeStatus(c *gin.Context) {
+	if h.runtime == nil {
+		c.JSON(http.StatusNotImplemented, gin.H{"error": "runtime status unavailable"})
+		return
+	}
+	status := h.runtime.CurrentStatus()
+	if status.UpdatedAt.IsZero() {
+		status.UpdatedAt = time.Now().UTC()
+	}
+	c.JSON(http.StatusOK, status)
 }
 
 // ListWeights returns cached weights stored on Venus.
