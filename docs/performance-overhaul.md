@@ -52,6 +52,14 @@ Commit worker code + Dockerfile target (docker build -f Dockerfile.worker ...). 
 Helm chart: add Deployment model-manager-worker, configs, RBAC to access PVC. Commit to ol-kubernetes-cluster.
 Push both repos; argocd app sync workloads-ai-model-manager.
 Verify: kubectl logs deploy/model-manager-worker, run curl -X POST /weights/install ... and watch kubectl get pods -w to ensure job executes; check WebSocket stream with wscat or curl SSE.
+
+**Verification – 2025-11-24**
+- Built/tagged `ghcr.io/oremus-labs/ol-model-manager:0.5.3-go`, pushed, and rolled it out via GitOps (`kubectl apply -f clusters/…/appsets/workloads.yaml` + `argocd app sync workloads-ai-model-manager`).
+- Confirmed `model-manager-api`, `model-manager-worker`, and `model-manager-sync` Deployments restarted with the new env vars (`REDIS_JOB_STREAM`, `REDIS_JOB_GROUP`) and passed `/healthz` behind the Traefik ingress (`https://model-manager-api.oremuslabs.app/healthz`).
+- Exercised `POST /weights/install` with `hfModelId=sshleifer/tiny-gpt2`; response returned job `9fb94e3d-478d-48fd-abcc-90e7038cdb3b` and `storageUri=pvc://venus-model-storage/sshleifer/tiny-gpt2`.
+- `GET /jobs/9fb94e3d-478d-48fd-abcc-90e7038cdb3b` reported `status=completed` and `progress=100` after Redis processed the queue entry (size ≈4.5 MiB).
+- `curl -N https://model-manager-api.oremuslabs.app/events` now seeds immediate `job.completed` SSE payloads without polling, so the UI can reflect progress live.
+
 Phase 2 – Hugging Face cache + background sync
 Background sync service (cmd/sync)
 
