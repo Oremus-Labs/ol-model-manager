@@ -82,6 +82,28 @@ func (c *Client) PostRawJSON(path string, payload []byte, target interface{}) er
 	return c.post(path, bytes.NewReader(payload), target)
 }
 
+func (c *Client) put(path string, body io.Reader, target interface{}) error {
+	base := strings.TrimRight(c.BaseURL, "/")
+	req, err := http.NewRequest(http.MethodPut, base+path, body)
+	if err != nil {
+		return err
+	}
+	if c.Token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.Token)
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Content-Type", "application/json")
+	return c.do(req, target)
+}
+
+func (c *Client) PutJSON(path string, payload interface{}, target interface{}) error {
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	return c.put(path, bytes.NewReader(data), target)
+}
+
 func (c *Client) DeleteJSON(path string, payload interface{}, target interface{}) error {
 	data, err := json.Marshal(payload)
 	if err != nil {
@@ -98,6 +120,19 @@ func (c *Client) DeleteJSON(path string, payload interface{}, target interface{}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Content-Type", "application/json")
 	return c.do(req, target)
+}
+
+func (c *Client) Delete(path string) error {
+	base := strings.TrimRight(c.BaseURL, "/")
+	req, err := http.NewRequest(http.MethodDelete, base+path, nil)
+	if err != nil {
+		return err
+	}
+	if c.Token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.Token)
+	}
+	req.Header.Set("Accept", "application/json")
+	return c.do(req, nil)
 }
 
 // StreamEvents opens the SSE feed and invokes handler for each event. Returning false stops the stream.

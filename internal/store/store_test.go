@@ -146,3 +146,41 @@ func TestDeleteJobsAndHistory(t *testing.T) {
 		t.Fatalf("expected history to be cleared, got %+v err=%v", history, err)
 	}
 }
+
+func TestAppendJobLogAndCounts(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	s, err := Open(filepath.Join(dir, "state.db"), "sqlite")
+	if err != nil {
+		t.Fatalf("failed to open store: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = s.Close()
+	})
+
+	job := &Job{ID: "job-log", Type: "weight_install", Status: JobPending}
+	if err := s.CreateJob(job); err != nil {
+		t.Fatalf("CreateJob: %v", err)
+	}
+
+	if err := s.AppendJobLog("job-log", JobLogEntry{Message: "hello"}); err != nil {
+		t.Fatalf("AppendJobLog: %v", err)
+	}
+
+	stored, err := s.GetJob("job-log")
+	if err != nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	if len(stored.Logs) != 1 || stored.Logs[0].Message != "hello" {
+		t.Fatalf("unexpected logs: %+v", stored.Logs)
+	}
+
+	counts, err := s.CountJobsByStatus()
+	if err != nil {
+		t.Fatalf("CountJobsByStatus: %v", err)
+	}
+	if counts[JobPending] != 1 {
+		t.Fatalf("expected pending=1 got %+v", counts)
+	}
+}

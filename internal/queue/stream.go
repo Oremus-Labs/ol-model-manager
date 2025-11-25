@@ -56,6 +56,14 @@ func (p *Producer) Enqueue(ctx context.Context, jobID string, req jobs.InstallRe
 	}).Err()
 }
 
+// Length returns the current length of the stream.
+func (p *Producer) Length(ctx context.Context) (int64, error) {
+	if p == nil || p.client == nil {
+		return 0, fmt.Errorf("queue producer not configured")
+	}
+	return p.client.XLen(ctx, p.stream).Result()
+}
+
 // Consumer pulls jobs from a Redis Stream consumer group.
 type Consumer struct {
 	client   redis.UniversalClient
@@ -142,4 +150,16 @@ func (c *Consumer) Ack(ctx context.Context, id string) error {
 		return nil
 	}
 	return c.client.XAck(ctx, c.stream, c.group, id).Err()
+}
+
+// Pending returns the number of entries pending acknowledgement for this group.
+func (c *Consumer) Pending(ctx context.Context) (int64, error) {
+	if c == nil || c.client == nil {
+		return 0, fmt.Errorf("queue consumer not configured")
+	}
+	info, err := c.client.XPending(ctx, c.stream, c.group).Result()
+	if err != nil {
+		return 0, err
+	}
+	return info.Count, nil
 }

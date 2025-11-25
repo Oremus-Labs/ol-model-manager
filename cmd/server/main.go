@@ -22,9 +22,11 @@ import (
 	"github.com/oremus-labs/ol-model-manager/internal/jobs"
 	"github.com/oremus-labs/ol-model-manager/internal/kserve"
 	"github.com/oremus-labs/ol-model-manager/internal/kube"
+	"github.com/oremus-labs/ol-model-manager/internal/logutil"
 	"github.com/oremus-labs/ol-model-manager/internal/queue"
 	"github.com/oremus-labs/ol-model-manager/internal/recommendations"
 	"github.com/oremus-labs/ol-model-manager/internal/redisx"
+	"github.com/oremus-labs/ol-model-manager/internal/secrets"
 	"github.com/oremus-labs/ol-model-manager/internal/status"
 	"github.com/oremus-labs/ol-model-manager/internal/store"
 	"github.com/oremus-labs/ol-model-manager/internal/validator"
@@ -36,7 +38,7 @@ import (
 )
 
 const (
-	version         = "0.4.18-go"
+	version         = "0.5.20-go"
 	shutdownTimeout = 5 * time.Second
 )
 
@@ -59,6 +61,20 @@ func main() {
 	cfg := config.Load()
 	log.Printf("Configuration loaded - Catalog: %s/%s, Namespace: %s, InferenceService: %s",
 		cfg.CatalogRoot, cfg.CatalogModelsDir, cfg.Namespace, cfg.InferenceServiceName)
+	logutil.Info("server_bootstrap", map[string]interface{}{
+		"version":           version,
+		"namespace":         cfg.Namespace,
+		"inferenceService":  cfg.InferenceServiceName,
+		"catalogRoot":       cfg.CatalogRoot,
+		"catalogModelsDir":  cfg.CatalogModelsDir,
+		"weightsPVC":        cfg.WeightsPVCName,
+		"redisAddr":         cfg.RedisAddr,
+		"redisJobStream":    cfg.RedisJobStream,
+		"redisJobGroup":     cfg.RedisJobGroup,
+		"eventsChannel":     cfg.EventsChannel,
+		"dataStoreDriver":   cfg.DataStoreDriver,
+		"recommendationTTL": cfg.RecommendationCacheTTL.String(),
+	})
 
 	// Initialize catalog
 	cat := catalog.New(cfg.CatalogRoot, cfg.CatalogModelsDir)
@@ -88,6 +104,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to initialize Kubernetes clientset: %v", err)
 	}
+	secretMgr := secrets.NewManager(coreClient, cfg.Namespace)
 
 	// Initialize weights/vLLM services
 	weightManager := weights.New(cfg.WeightsStoragePath)
@@ -214,7 +231,7 @@ func main() {
 	}
 
 	// Initialize handlers
-	h := handlers.New(cat, ksClient, weightManager, vllmDiscovery, catalogValidator, catWriter, advisor, stateStore, jobManager, eventBus, jobQueue, hfCache, runtimeStatus, handlers.Options{
+	h := handlers.New(cat, ksClient, weightManager, vllmDiscovery, catalogValidator, catWriter, advisor, stateStore, jobManager, eventBus, jobQueue, hfCache, runtimeStatus, secretMgr, handlers.Options{
 		CatalogTTL:             cfg.CatalogRefreshInterval,
 		WeightsInstallTimeout:  cfg.WeightsInstallTimeout,
 		HuggingFaceToken:       cfg.HuggingFaceToken,

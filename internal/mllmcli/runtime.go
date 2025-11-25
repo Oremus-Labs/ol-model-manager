@@ -33,12 +33,33 @@ type DeploymentStatus struct {
 }
 
 type PodStatus struct {
-	Name        string            `json:"name"`
-	Phase       string            `json:"phase"`
-	Reason      string            `json:"reason"`
-	Message     string            `json:"message"`
-	Conditions  []Condition       `json:"conditions"`
-	GPURequests map[string]string `json:"gpuRequests"`
+	Name            string                   `json:"name"`
+	Phase           string                   `json:"phase"`
+	ReadyContainers int32                    `json:"readyContainers"`
+	TotalContainers int32                    `json:"totalContainers"`
+	Restarts        int32                    `json:"restarts"`
+	HostIP          string                   `json:"hostIP"`
+	PodIP           string                   `json:"podIP"`
+	NodeName        string                   `json:"nodeName"`
+	Reason          string                   `json:"reason"`
+	Message         string                   `json:"message"`
+	StartTime       *time.Time               `json:"startTime"`
+	Conditions      []Condition              `json:"conditions"`
+	Containers      []ContainerStatusSummary `json:"containers"`
+	GPURequests     map[string]string        `json:"gpuRequests"`
+	GPULimits       map[string]string        `json:"gpuLimits"`
+}
+
+// ContainerStatusSummary mirrors per-container state emitted by the API.
+type ContainerStatusSummary struct {
+	Name         string     `json:"name"`
+	Ready        bool       `json:"ready"`
+	RestartCount int32      `json:"restartCount"`
+	State        string     `json:"state"`
+	Reason       string     `json:"reason"`
+	Message      string     `json:"message"`
+	StartedAt    *time.Time `json:"startedAt"`
+	FinishedAt   *time.Time `json:"finishedAt"`
 }
 
 type Condition struct {

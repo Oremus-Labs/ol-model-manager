@@ -18,12 +18,13 @@ import (
 
 // Manager coordinates asynchronous background work (e.g., weight installs).
 type Manager struct {
-	store     *store.Store
-	weights   weightStore
-	hfToken   string
-	pvcName   string
-	modelRoot string
-	events    eventPublisher
+	store       *store.Store
+	weights     weightStore
+	hfToken     string
+	pvcName     string
+	modelRoot   string
+	events      eventPublisher
+	maxAttempts int
 }
 
 type weightStore interface {
@@ -42,17 +43,22 @@ type Options struct {
 	WeightsPVCName     string
 	InferenceModelRoot string
 	EventPublisher     eventPublisher
+	MaxJobAttempts     int
 }
 
 // New creates a job manager.
 func New(opts Options) *Manager {
+	if opts.MaxJobAttempts <= 0 {
+		opts.MaxJobAttempts = 3
+	}
 	return &Manager{
-		store:     opts.Store,
-		weights:   opts.Weights,
-		hfToken:   opts.HuggingFaceToken,
-		pvcName:   opts.WeightsPVCName,
-		modelRoot: opts.InferenceModelRoot,
-		events:    opts.EventPublisher,
+		store:       opts.Store,
+		weights:     opts.Weights,
+		hfToken:     opts.HuggingFaceToken,
+		pvcName:     opts.WeightsPVCName,
+		modelRoot:   opts.InferenceModelRoot,
+		events:      opts.EventPublisher,
+		maxAttempts: opts.MaxJobAttempts,
 	}
 }
 
@@ -80,15 +86,21 @@ func (m *Manager) CreateJob(req InstallRequest) (*store.Job, error) {
 	if m.store == nil || m.weights == nil {
 		return nil, fmt.Errorf("job manager not configured")
 	}
+	payload := map[string]interface{}{
+		"hfModelId": req.ModelID,
+		"revision":  req.Revision,
+		"target":    req.Target,
+		"overwrite": req.Overwrite,
+	}
+	if len(req.Files) > 0 {
+		payload["files"] = req.Files
+	}
 	job := &store.Job{
-		ID:   uuid.NewString(),
-		Type: "weight_install",
-		Payload: map[string]interface{}{
-			"hfModelId": req.ModelID,
-			"revision":  req.Revision,
-			"target":    req.Target,
-		},
-		Status: store.JobPending,
+		ID:          uuid.NewString(),
+		Type:        "weight_install",
+		Payload:     payload,
+		Status:      store.JobPending,
+		MaxAttempts: m.maxAttempts,
 	}
 	if err := m.store.CreateJob(job); err != nil {
 		return nil, err
@@ -123,7 +135,10 @@ func (m *Manager) processJob(job *store.Job, req InstallRequest) {
 		metrics.ObserveJobCompletion(job.Type, finalStatus, time.Since(start))
 	}()
 
-	m.updateJob(job, store.JobRunning, 5, "queued", "Waiting for worker")
+	job.Attempt++
+	m.logJob(job, "info", "queued", fmt.Sprintf("Attempt %d/%d scheduled", job.Attempt, job.MaxAttempts))
+	m.updateJob(job, store.JobRunning, 5, "queued", fmt.Sprintf("Attempt %d/%d queued", job.Attempt, job.MaxAttempts))
+	m.logJob(job, "info", "preparing", "Preparing cache directory")
 	m.updateJob(job, store.JobRunning, 15, "preparing", "Preparing cache directory")
 
 	info, err := m.weights.InstallFromHuggingFace(ctx, weights.InstallOptions{
@@ -133,6 +148,25 @@ func (m *Manager) processJob(job *store.Job, req InstallRequest) {
 		Files:     req.Files,
 		Token:     m.hfToken,
 		Overwrite: req.Overwrite,
+		ProgressBytes: func(file string, fileIndex, total int, downloaded, totalBytes int64) {
+			if total == 0 {
+				return
+			}
+			fraction := float64(fileIndex)
+			if totalBytes > 0 && downloaded > 0 {
+				ratio := float64(downloaded) / float64(totalBytes)
+				if ratio > 1 {
+					ratio = 1
+				}
+				fraction += ratio
+			}
+			progress := 20 + int(math.Round((fraction/float64(total))*70))
+			msg := fmt.Sprintf("Downloading %s", file)
+			if totalBytes > 0 && downloaded >= 0 {
+				msg = fmt.Sprintf("Downloading %s (%0.1f%%)", file, float64(downloaded)/float64(totalBytes)*100)
+			}
+			m.updateJob(job, store.JobRunning, progress, "downloading", msg)
+		},
 		Progress: func(file string, completed, total int) {
 			progress := 20
 			if total > 0 {
@@ -152,6 +186,7 @@ func (m *Manager) processJob(job *store.Job, req InstallRequest) {
 		m.appendHistory(job.ID, "weight_install_failed", req.ModelID, map[string]interface{}{
 			"error": err.Error(),
 		})
+		m.logJob(job, "error", "failed", err.Error())
 		logutil.Error("weights_install_failed", err, map[string]interface{}{
 			"jobId":   job.ID,
 			"modelId": req.ModelID,
@@ -175,6 +210,7 @@ func (m *Manager) processJob(job *store.Job, req InstallRequest) {
 	}
 	job.Result = result
 	m.updateJob(job, store.JobDone, 100, "completed", "Weights ready")
+	m.logJob(job, "info", "completed", "Weights ready")
 
 	m.appendHistory(job.ID, "weight_install_completed", req.ModelID, job.Result)
 	logutil.Info("weights_install_completed", map[string]interface{}{
@@ -252,5 +288,41 @@ func (m *Manager) emitJobEvent(job *store.Job) {
 		Data:      payload,
 	}); err != nil {
 		log.Printf("jobs: failed to publish event for job %s: %v", job.ID, err)
+	}
+}
+
+func (m *Manager) logJob(job *store.Job, level, stage, message string) {
+	if m.store == nil || job == nil {
+		return
+	}
+	entry := store.JobLogEntry{
+		Timestamp: time.Now().UTC(),
+		Level:     level,
+		Stage:     stage,
+		Message:   message,
+	}
+	if err := m.store.AppendJobLog(job.ID, entry); err != nil {
+		log.Printf("jobs: failed to append log for job %s: %v", job.ID, err)
+		return
+	}
+	m.emitJobLogEvent(job.ID, entry)
+}
+
+func (m *Manager) emitJobLogEvent(jobID string, entry store.JobLogEntry) {
+	if m.events == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := m.events.Publish(ctx, events.Event{
+		ID:        fmt.Sprintf("%s-log-%d", jobID, entry.Timestamp.UnixNano()),
+		Type:      "job.log",
+		Timestamp: entry.Timestamp,
+		Data: map[string]interface{}{
+			"jobId": jobID,
+			"log":   entry,
+		},
+	}); err != nil {
+		log.Printf("jobs: failed to publish log event for job %s: %v", jobID, err)
 	}
 }

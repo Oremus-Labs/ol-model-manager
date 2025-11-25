@@ -14,6 +14,7 @@ import (
 	"github.com/oremus-labs/ol-model-manager/config"
 	"github.com/oremus-labs/ol-model-manager/internal/events"
 	"github.com/oremus-labs/ol-model-manager/internal/jobs"
+	"github.com/oremus-labs/ol-model-manager/internal/logutil"
 	"github.com/oremus-labs/ol-model-manager/internal/queue"
 	"github.com/oremus-labs/ol-model-manager/internal/redisx"
 	"github.com/oremus-labs/ol-model-manager/internal/store"
@@ -21,7 +22,7 @@ import (
 	"github.com/oremus-labs/ol-model-manager/internal/worker"
 )
 
-const workerVersion = "0.4.15-go"
+const workerVersion = "0.5.20-go"
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
@@ -31,6 +32,12 @@ func main() {
 	defer cancel()
 
 	cfg := config.Load()
+	logutil.Info("worker_bootstrap", map[string]interface{}{
+		"version":        workerVersion,
+		"redisAddr":      cfg.RedisAddr,
+		"redisJobStream": cfg.RedisJobStream,
+		"redisJobGroup":  cfg.RedisJobGroup,
+	})
 	stateStore, err := store.Open(cfg.DataStoreDSN, cfg.DataStoreDriver)
 	if err != nil {
 		log.Fatalf("worker: failed to open datastore: %v", err)

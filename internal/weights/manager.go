@@ -81,13 +81,14 @@ type weightMetadata struct {
 
 // InstallOptions controls how weights are installed for a model.
 type InstallOptions struct {
-	ModelID   string
-	Revision  string
-	Target    string
-	Files     []string
-	Token     string
-	Overwrite bool
-	Progress  func(file string, completed, total int)
+	ModelID       string
+	Revision      string
+	Target        string
+	Files         []string
+	Token         string
+	Overwrite     bool
+	Progress      func(file string, completed, total int)
+	ProgressBytes func(file string, fileIndex, totalFiles int, downloaded, totalBytes int64)
 }
 
 // New creates a new weight manager.
@@ -328,6 +329,7 @@ func (m *Manager) InstallFromHuggingFace(ctx context.Context, opts InstallOption
 	}
 	var downloadedFiles int
 
+	totalFiles := len(opts.Files)
 	for _, file := range opts.Files {
 		select {
 		case <-ctx.Done():
@@ -343,7 +345,12 @@ func (m *Manager) InstallFromHuggingFace(ctx context.Context, opts InstallOption
 
 		url := fmt.Sprintf("%s/%s/resolve/%s/%s", m.hfBaseURL, opts.ModelID, revision, file)
 		destFile := filepath.Join(tmpPath, file)
-		if err := downloadFile(ctx, client, url, destFile, opts.Token); err != nil {
+		currentIndex := downloadedFiles
+		if err := downloadFile(ctx, client, url, destFile, opts.Token, func(downloaded, total int64) {
+			if opts.ProgressBytes != nil && totalFiles > 0 {
+				opts.ProgressBytes(file, currentIndex, totalFiles, downloaded, total)
+			}
+		}); err != nil {
 			_ = os.RemoveAll(tmpPath)
 			return nil, fmt.Errorf("failed to download %s: %w", file, err)
 		}
@@ -511,7 +518,7 @@ func toFilesystemPath(rel string) string {
 	return filepath.Join(parts...)
 }
 
-func downloadFile(ctx context.Context, client *http.Client, url, destPath, token string) error {
+func downloadFile(ctx context.Context, client *http.Client, url, destPath, token string, progress func(downloaded, total int64)) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return err
@@ -541,10 +548,30 @@ func downloadFile(ctx context.Context, client *http.Client, url, destPath, token
 		return fmt.Errorf("failed to create temp file: %w", err)
 	}
 
-	if _, err := io.Copy(file, resp.Body); err != nil {
-		file.Close()
-		_ = os.Remove(tmpFile)
-		return fmt.Errorf("failed to write file: %w", err)
+	var written int64
+	total := resp.ContentLength
+	buf := make([]byte, 2<<20)
+	for {
+		n, readErr := resp.Body.Read(buf)
+		if n > 0 {
+			if _, err := file.Write(buf[:n]); err != nil {
+				file.Close()
+				_ = os.Remove(tmpFile)
+				return fmt.Errorf("failed to write file: %w", err)
+			}
+			written += int64(n)
+			if progress != nil {
+				progress(written, total)
+			}
+		}
+		if readErr != nil {
+			if readErr == io.EOF {
+				break
+			}
+			file.Close()
+			_ = os.Remove(tmpFile)
+			return fmt.Errorf("failed to download file: %w", readErr)
+		}
 	}
 
 	if err := file.Close(); err != nil {

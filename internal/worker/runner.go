@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/oremus-labs/ol-model-manager/internal/jobs"
+	"github.com/oremus-labs/ol-model-manager/internal/metrics"
 	"github.com/oremus-labs/ol-model-manager/internal/queue"
 	"github.com/oremus-labs/ol-model-manager/internal/store"
 )
@@ -71,6 +72,7 @@ func (r *Runner) Run(ctx context.Context) error {
 		return err
 	}
 	r.logger.Println("worker connected to Redis queue; waiting for jobs")
+	r.observeQueueDepth(ctx)
 
 	for {
 		select {
@@ -98,11 +100,28 @@ func (r *Runner) Run(ctx context.Context) error {
 				continue
 			}
 
+			if job.Status == store.JobCancelled {
+				r.logger.Printf("worker: job %s cancelled; skipping", job.ID)
+				_ = r.queue.Ack(ctx, msgID)
+				continue
+			}
+			if job.Status == store.JobDone {
+				_ = r.queue.Ack(ctx, msgID)
+				continue
+			}
+			if job.Status != store.JobPending && job.Status != store.JobRunning {
+				r.logger.Printf("worker: job %s in status %s; skipping", job.ID, job.Status)
+				_ = r.queue.Ack(ctx, msgID)
+				continue
+			}
+
 			r.logger.Printf("worker: processing job %s (%s)", msg.JobID, msg.Request.ModelID)
 			r.jobs.ProcessJob(job, msg.Request)
 
 			if err := r.queue.Ack(ctx, msgID); err != nil {
 				r.logger.Printf("worker: failed to ack message %s: %v", msgID, err)
+			} else {
+				r.observeQueueDepth(ctx)
 			}
 		}
 	}
@@ -120,4 +139,19 @@ func (r *Runner) pendingJobs() int {
 		return 0
 	}
 	return len(jobs)
+}
+
+func (r *Runner) observeQueueDepth(ctx context.Context) {
+	if r.queue == nil {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	depth, err := r.queue.Pending(ctx)
+	if err != nil {
+		r.logger.Printf("worker: failed to inspect queue depth: %v", err)
+		return
+	}
+	metrics.SetJobQueueDepth(depth)
 }

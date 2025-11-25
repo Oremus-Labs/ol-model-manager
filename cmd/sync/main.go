@@ -12,13 +12,14 @@ import (
 	"github.com/oremus-labs/ol-model-manager/config"
 	"github.com/oremus-labs/ol-model-manager/internal/events"
 	"github.com/oremus-labs/ol-model-manager/internal/hfcache"
+	"github.com/oremus-labs/ol-model-manager/internal/logutil"
 	"github.com/oremus-labs/ol-model-manager/internal/redisx"
 	"github.com/oremus-labs/ol-model-manager/internal/store"
 	"github.com/oremus-labs/ol-model-manager/internal/syncsvc"
 	"github.com/oremus-labs/ol-model-manager/internal/vllm"
 )
 
-const syncVersion = "0.4.18-go"
+const syncVersion = "0.5.20-go"
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
@@ -28,6 +29,13 @@ func main() {
 	defer cancel()
 
 	cfg := config.Load()
+	logutil.Info("sync_bootstrap", map[string]interface{}{
+		"version":        syncVersion,
+		"redisAddr":      cfg.RedisAddr,
+		"redisJobStream": cfg.RedisJobStream,
+		"eventsChannel":  cfg.EventsChannel,
+		"huggingfaceTTL": cfg.HuggingFaceCacheTTL.String(),
+	})
 	discovery := vllm.New(
 		vllm.WithGitHubToken(cfg.GitHubToken),
 		vllm.WithHuggingFaceToken(cfg.HuggingFaceToken),

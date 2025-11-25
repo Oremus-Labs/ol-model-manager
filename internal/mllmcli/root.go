@@ -60,6 +60,16 @@ func init() {
 	rootCmd.AddCommand(modelsCmd)
 	rootCmd.AddCommand(weightsCmd)
 	rootCmd.AddCommand(jobsCmd)
+	rootCmd.AddCommand(runtimeCmd)
+	rootCmd.AddCommand(recommendCmd)
+	rootCmd.AddCommand(notifyCmd)
+	rootCmd.AddCommand(tokensCmd)
+	rootCmd.AddCommand(policyCmd)
+	rootCmd.AddCommand(auditCmd)
+	rootCmd.AddCommand(backupsCmd)
+	rootCmd.AddCommand(cleanupCmd)
+	rootCmd.AddCommand(secretsCmd)
+	rootCmd.AddCommand(playbooksCmd)
 	rootCmd.AddCommand(configCmd)
 }
 

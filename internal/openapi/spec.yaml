@@ -22,6 +22,16 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/SystemInfo'
+  /system/summary:
+    get:
+      summary: Aggregated control-plane summary
+      responses:
+        '200':
+          description: Summary payload
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SystemSummary'
   /openapi:
     get:
       summary: OpenAPI specification in JSON
@@ -393,6 +403,55 @@ paths:
       responses:
         '200':
           description: Job record
+  /jobs/{id}/logs:
+    get:
+      summary: Retrieve job log entries
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Logs
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  logs:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/JobLogEntry'
+  /jobs/{id}/cancel:
+    post:
+      summary: Cancel a pending or running job
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Job cancelled
+        '400':
+          description: Job not cancellable
+  /jobs/{id}/retry:
+    post:
+      summary: Retry a failed/cancelled job
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '202':
+          description: Job queued
+        '400':
+          description: Job cannot be retried
   /history:
     get:
       summary: Historical install/activation events
@@ -461,12 +520,37 @@ components:
           type: object
         error:
           type: string
+        attempt:
+          type: integer
+          format: int32
+        maxAttempts:
+          type: integer
+          format: int32
+        cancelledAt:
+          type: string
+          format: date-time
+        logs:
+          type: array
+          items:
+            $ref: '#/components/schemas/JobLogEntry'
         createdAt:
           type: string
           format: date-time
         updatedAt:
           type: string
           format: date-time
+    JobLogEntry:
+      type: object
+      properties:
+        timestamp:
+          type: string
+          format: date-time
+        level:
+          type: string
+        stage:
+          type: string
+        message:
+          type: string
     HistoryEntry:
       type: object
       properties:
@@ -593,3 +677,66 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/HistoryEntry'
+    SystemSummary:
+      type: object
+      properties:
+        version:
+          type: string
+        timestamp:
+          type: string
+          format: date-time
+        catalog:
+          $ref: '#/components/schemas/SummaryCatalog'
+        weights:
+          $ref: '#/components/schemas/SummaryWeights'
+        jobs:
+          type: object
+          additionalProperties:
+            type: integer
+        queue:
+          $ref: '#/components/schemas/SummaryQueue'
+        huggingface:
+          $ref: '#/components/schemas/SummaryHF'
+        runtime:
+          type: object
+        alerts:
+          type: array
+          items:
+            $ref: '#/components/schemas/Alert'
+    SummaryCatalog:
+      type: object
+      properties:
+        count:
+          type: integer
+        source:
+          type: string
+    SummaryWeights:
+      type: object
+      properties:
+        path:
+          type: string
+        pvcName:
+          type: string
+        installed:
+          type: integer
+        usage:
+          type: object
+    SummaryQueue:
+      type: object
+      properties:
+        depth:
+          type: integer
+    SummaryHF:
+      type: object
+      properties:
+        cachedModels:
+          type: integer
+    Alert:
+      type: object
+      properties:
+        level:
+          type: string
+        kind:
+          type: string
+        message:
+          type: string

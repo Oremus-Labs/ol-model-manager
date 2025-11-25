@@ -112,6 +112,16 @@ REST+WS contract
 - `/events` sampling verified via `timeout 10s curl -Ns …/events` which now surfaces `model.activation.started/completed` frames (job `qwen2.5-0.5b-instruct` tested at 2025‑11‑24T22:30Z).
 - GraphQL endpoint exposed at `/graphql` (powered by `github.com/graphql-go/graphql`) covers models, jobs, runtime status, and Hugging Face cache queries; documented in `docs/events.md` and validated via `curl -X POST …/graphql -d '{"query":"{ models { id } jobs(limit:1) { id status } }"}'`.
 
+Backups & cleanup endpoints
+
+- Datastore migrations now create a `backups` table and the API exposes `GET /backups` + `POST /backups` for tracking PVC/S3 snapshots. `/cleanup/weights` accepts a list of cached model directories and kicks off deletion jobs that publish `job.completed` frames once the directories are removed.
+- CLI parity landed via `mllm backups list|record` and `mllm cleanup weights --name <dir>` complete with table/JSON output.
+- Verification (2025‑11‑25):
+  - Rebuilt/pushed `ghcr.io/oremus-labs/ol-model-manager:0.5.17-go`, bumped the Helm chart/AppSet to the new tag + deployment revision, applied `clusters/…/appsets/workloads.yaml`, and `argocd app sync workloads-ai-model-manager` until Healthy. `kubectl get deploy model-manager-{api,worker,sync}` now shows the 0.5.17-go image and the worker log prints `worker connected to Redis queue; waiting for jobs`.
+  - Recorded a manual backup via `go run ./cmd/mllm --config ~/.config/mllm/config.yaml backups record --type manual --location pvc://venus-model-storage/snapshot-20251125 --notes pre-phase4-verify`, then confirmed it with `mllm backups list` (ID `52078c80-2494-4365-aba3-57b0a369d5ce`).
+  - Installed `sshleifer/tiny-gpt2` into `cleanup-demo` (`mllm weights install … --watch`) and immediately removed it with `mllm cleanup weights --name cleanup-demo`; `mllm weights list` now only shows the long-lived `deepseek-live-demo` payload, proving the cleanup route scrubs the PVC directory and returns structured results.
+  - `timeout 5s curl -Ns -H "Accept: text/event-stream" -H "Authorization: Bearer $MM_TOKEN" https://model-manager-api.oremuslabs.app/events` demonstrates the richer stream (seed markers + the recent job completion IDs), so the UI/CLI can rely on live telemetry for installs without polling.
+
 Optional GraphQL layer
 
 If we go GraphQL, add cmd/api resolvers for queries/subscriptions (gqlgen). But can skip if REST+WS suffices.
@@ -172,6 +182,16 @@ We are building a Docker/Kubectl-grade CLI that interacts with every facet of th
 - `mllm notify set --slack-webhook ...`.
 - `mllm policy list/apply`, `audit list --since`.
 
+**Next Up (Phase 5B–5D)**
+
+- Notifications: backend `/notifications` CRUD + Slack/webhook sender, CLI verbs `mllm notify list/add/remove/test`.
+- API tokens: `/tokens` issuance/rotation with scopes; CLI `mllm tokens issue/revoke/list`.
+- Policy/audit: surface history via `/audit` + `mllm audit list --since 24h`, policy templating `mllm policy apply`.
+- Runtime diagnostics: `mllm runtime logs <pod>`, `runtime events --since`, `runtime diagnose` (pulls describe/log summaries).
+- Rollout UX: `mllm models promote`, blue/green tracking, `mllm models history --follow`.
+- Backup & cleanup: `/backups` endpoints + CLI `mllm backup run/list/restore`, `mllm cleanup orphaned-weights --dry-run`.
+- Advanced UX: global search (`mllm search <query>` hitting a combined endpoint), JSONPath render (`-o jsonpath=`), shell completions + plugin loader.
+
 ### Backup & Maintenance
 - `mllm backup run`, `backup list/restore`.
 - `mllm cleanup orphaned-weights --dry-run`.
@@ -194,6 +214,61 @@ Implementation phases:
 5. Secrets/notifications/backup.
 6. Plugins, completion, documentation polish.
 
+### Phase 6 – Docker-Desktop-grade backend/CLI polish
+
+To unlock a faithful Docker Desktop-like UI we need a final backend/CLI sweep. Each sub-phase below is designed to be implementable in one development burst (code + tests + docs + deploy) so we never lose context. Once Phase 6A–6D land, all UI features can rely on first-class APIs/commands rather than bespoke glue.
+
+#### Phase 6A – Job lifecycle + dashboard summaries
+1. **Datastore extensions**: Add `attempt`, `max_attempts`, `cancelled_at`, and `logs` (JSON) fields to the `jobs` table/migrations. Update `internal/store` structs + helpers accordingly.
+2. **Job controller APIs**:
+   - `POST /jobs/:id/cancel` → sets status `cancelled` if pending/running, emits `job.cancelled`.
+   - `POST /jobs/:id/retry` → requeues a failed/cancelled job if `attempt < maxAttempts`.
+   - `GET /jobs/:id/logs` → returns structured history/log entries (source: worker logutil + datastore `logs` field).
+3. **Worker support**: Runner honors `cancelled` jobs (stop processing), increments attempt count, records log lines into the job record, and supports backoff before retrying.
+4. **CLI parity**: Add `mllm jobs cancel <id>`, `mllm jobs retry <id>`, `mllm jobs logs <id> [--follow]` using SSE for live log streaming.
+5. **System summary API**: Implement `/system/summary` returning cards for catalog size, weights installed, active runtime health, job queue depth, HF cache stats, PVC usage, alert banners. Backed by cached status/metrics structures.
+6. **Docs/tests**: Update README + this roadmap, expand handler and store tests, `go test ./...`.
+
+✅ **Phase 6A (2025-11-25)**  
+- Job schema now tracks attempts, maxAttempts, cancellation timestamps, and structured log entries; Redis worker respects cancellations and publishes `job.log` SSE events.  
+- New endpoints: `POST /jobs/:id/cancel`, `POST /jobs/:id/retry`, `GET /jobs/:id/logs`, plus `/system/summary` for dashboard cards. CLI gained `mllm jobs cancel|retry|logs`, enhanced `mllm status` output, and job log streaming.  
+- Store/count helpers + summary endpoint power the Docker Desktop-style dashboard cards (weights usage, job counts, queue depth, alerts).  
+- Verification: `go test ./...`, manual CLI flows (`mllm jobs retry --watch`, `mllm jobs logs --follow`, `mllm status`) against the live API after enabling the new routes.  
+- Provisioned a dedicated PostgreSQL 15 instance (`helm upgrade --install model-manager-postgres bitnami/postgresql ... --set global.storageClass=longhorn`) and pointed the model-manager Helm release at it via new Helm parameters (`datastore.driver=postgres`, `datastore.dsn=postgresql://modelmanager:modelmanager-secret@model-manager-postgres-postgresql.ai.svc.cluster.local:5432/modelmanager?sslmode=disable`). Re-running the large weight install + `mllm jobs cancel` no longer produces `SQLITE_BUSY`, proving cancellation/log writes behave cleanly on Postgres. 2025-11-25 validation: job `4d817214-9082-4f03-b2c2-94852dae0f72` was cancelled mid-download and `mllm jobs logs` returned the persisted `Job cancelled via API` entry while the earlier queue-only cancel left no log, as expected.
+
+#### Phase 6B – Activation/deactivation workflows + playbooks
+1. **Runtime endpoints**:
+   - `POST /runtime/activate` (model ID + options) orchestrates catalog selection, KServe apply, and history logging.
+   - `POST /runtime/deactivate` and `POST /runtime/promote` support blue/green or direct swaps with safety checks.
+2. **Eventing**: emit `model.activation.started|completed|failed` with metadata (model, attempts, duration).
+3. **Playbooks**: Add `/playbooks` CRUD storing curated install+activate templates (JSON/YAML). Support `POST /playbooks/:name/run`.
+4. **CLI commands**: `mllm runtime activate`, `mllm runtime deactivate`, `mllm runtime switch`, plus `mllm playbooks list/get/run`. Include prompts (`--yes`) and `--watch` for rollout progress.
+5. **Verification**: Integration smoke tests (mocked KServe), doc updates, full deploy pipeline.
+
+✅ **Phase 6B (2025-11-25)**  
+- Added `/runtime/activate`, `/runtime/deactivate`, and `/runtime/promote` so the UI/CLI can surface richer activation metadata (strategy, previous model, requester) without parsing the legacy `/models/*` endpoints. All paths reuse the shared `activateModelInternal` helper so events/history stay consistent, and `/runtime/promote` sanity-checks the current active model before flipping.  
+- Introduced datastore-backed playbooks (`store.Playbook`) along with CRUD + `/playbooks/:name/run`. Running a playbook schedules weight installs via the same queue helpers (returning job IDs + storage URIs) and optionally auto-activates when possible; otherwise the API marks the activation step as `pending_install` so the CLI/UI can finish the workflow.  
+- `mllm runtime activate|deactivate|status|switch` now call the runtime endpoints and fallback to the legacy routes if the cluster is still on an older build. `mllm playbooks list|get|apply|delete|run` provides Docker-Desktop-style automation, including `--watch` and `--auto-activate` to wait for installs and promote as soon as they complete. Responses reuse the existing SSE activation watcher so `--watch` streams lifecycle events in real-time.
+
+#### Phase 6C – Global search, support bundle, quick actions
+1. **Search API**: Add `/search?q=` returning aggregated results (models, weights, jobs, HF models, notifications). Support filters/pagination.
+2. **CLI**: implement `mllm search <term> [--type ...]` printing ranked cards with “suggested next action” hints and `--open` to jump to details.
+3. **Support bundle**: `/support/bundle` packages recent API/worker/sync logs + metrics snapshots. CLI `mllm support bundle` downloads the archive locally (optionally uploads to S3).
+4. **Audit**: ensure search/support actions record audit log entries surfaced via existing `/history`.
+
+#### Phase 6D – Notifications, metrics polish, alerts
+1. **Notification history**: Expand `/notifications` with `/notifications/:name/history` and CLI `mllm notify history`.
+2. **Metrics summary**: Provide `/metrics/summary` (JSON) aggregating Prom series (SSE connections, queue depth, job throughput), plus CLI `mllm metrics top` for textual dashboards.
+3. **Alerting**: Add PVC/job failure threshold detection in the API; emit `alert.triggered` SSE events and expose current alerts via `/system/summary`.
+
+Each sub-phase ends with:
+- `go test ./...`
+- Docker image build/push (`ghcr.io/oremus-labs/ol-model-manager:<tag>`)
+- Helm/GitOps tag bump + `argocd app sync workloads-ai-model-manager`
+- Live verification using `mllm` against `https://model-manager-api.oremuslabs.app`
+
+After Phase 6, the backend and CLI expose the same high-level affordances Docker Desktop relies on (job controls, activation buttons, templates, quick search, summaries), so building the UI clone becomes a pure frontend effort.
+
 **Verification – 2025-11-24**
 - `cmd/mllm` bootstrap landed with cobra-based root command, persistent config (`~/.config/mllm/config.yaml`), and initial verbs:
   - `mllm config set-context`, `use-context`, `current-context`, and `view`.
@@ -207,6 +282,22 @@ Implementation phases:
   - Introduced `mllm jobs list|get|watch` for tailing Redis-backed installs, and `mllm weights list|usage|info|install|delete` for PVC management. `--watch` streams SSE frames, so large downloads show progress without polling.
   - Added runtime-awareness to `mllm weights install`: if the active InferenceService monopolises the lone GPU, the CLI prompts (or `--preempt-active` auto-confirms) to deactivate `active-llm`, waits for the pending pods to drain, then re-activates the model after installation. This prevents the “pod never schedules” failure mode.
   - Verified end-to-end by staging multiple `sshleifer/tiny-gpt2` targets, exercising `mllm jobs watch <job-id>`, and confirming the worker logs and SSE stream report `weight_install_completed`. After forcing a GPU contention scenario, the CLI now warns, deactivates, and reactivates automatically once jobs finish.
+- ✅ **Phase 4 (Runtime control & placement intelligence) – 2025-11-24**
+  - Added `mllm runtime status|activate|deactivate` with `--watch`, `--details`, and `--wait` flags. Status pulls the cached `/models/status` payload (pod-level readiness, GPU allocations, informer timestamp) and disallows `--watch` with `-o json` to avoid malformed output. Activation waits stream `model.activation.*` SSE events with automatic reconnection and fallback polling so the CLI reports lifecycle milestones exactly when the backend emits them.
+  - Introduced `mllm recommend profiles|gpu|compatibility` wired to the `/recommendations/*` and `/models/:id/compatibility` endpoints. The commands print curated GPU profiles, recommended vLLM flags, and compatibility verdicts (table or JSON) so operators can preflight deployments before staging weights.
+  - Verification: `go test ./...` is green; ran `go run ./cmd/mllm --config ~/.config/mllm/config.yaml runtime status --details` to confirm pod summaries render, plus `mllm recommend profiles`, `mllm recommend gpu amd-mi210-venus`, and `mllm recommend compatibility qwen2.5-0.5b-instruct --gpu amd-mi210-venus` against `https://model-manager-api.oremuslabs.app` (token from prod context). All commands returned successful, human-friendly output using the live control plane.
+- ✅ **Phase 5 (Secret management foundations) – 2025-11-24**
+  - Backend now exposes `/secrets` (list/get) plus `/secrets/:name` (PUT/DELETE) guarded by the API token. The handlers talk directly to Kubernetes Secrets in the Model Manager namespace via a new `internal/secrets.Manager`, tagging managed secrets with `model-manager.oremuslabs.app/managed-secret=true`.
+  - Helm RBAC extends the service account permissions to `secrets` so the API Deployment can create/update/delete those resources.
+  - CLI adds `mllm secrets list|get|set|delete` with `--data key=value` and `--from-file key=path` helpers plus confirmation prompts for destructive operations. Output honors `-o json` for automation.
+  - Verification: `go test ./...` (including the updated handler tests) passes locally. Functional verification on the live cluster requires building/pushing the new API image and syncing the GitOps repo so the `/secrets` endpoints are available behind `model-manager-api.oremuslabs.app`.
+
+- 🚧 **Phase 5B (Notification, token, and policy/audit management) – 2025-11-24**
+  - Added `/notifications` CRUD backed by the datastore so multiple channels (Slack/webhooks/etc.) can be stored; CLI gained `mllm notify list|add|delete|test`.
+  - `/notifications/test` still uses the configured Slack webhook to send an ad-hoc message so operators can validate alerting. Use `mllm notify test --message "..."` for a one-off smoke test.
+  - Introduced `/tokens` (list/issue/delete) and `mllm tokens list|issue|revoke`; issuing returns the plaintext token once while storing only the hash for future validation.
+  - Exposed `/policies` CRUD plus `/history?since=` filtering so the CLI can apply/delete policies (`mllm policy list|apply|delete`) and query audit history via `mllm audit list --since 24h`.
+  - Upcoming work: `/notifications` CRUD, `/tokens` management, audit/policy endpoints, backup orchestration, runtime diagnostics, rollout orchestration, and JSONPath/global search UX.
 
 ---
 

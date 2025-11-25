@@ -10,7 +10,7 @@ HTTP API service for dynamically managing KServe InferenceServices based on mode
 ## Features
 
 - List available models from git-synced catalog with automatic refresh caching
-- Activate and deactivate KServe InferenceServices for catalog entries
+- Activate and deactivate KServe InferenceServices for catalog entries (now also exposed via `/runtime/*` endpoints for richer orchestration data)
 - Inspect and manage cached HuggingFace weights on the Venus PVC
 - Install new model weights directly from HuggingFace (with optional auth token) with async job tracking
 - Generate draft catalog entries from HuggingFace metadata via vLLM discovery helpers and manifest previews
@@ -21,6 +21,7 @@ HTTP API service for dynamically managing KServe InferenceServices based on mode
 - Validate catalog entries against the shared schema, PVC/secret availability, and GPU capacity
 - Dry-run KServe activations (and optional readiness probes) before flipping production traffic
 - Estimate GPU compatibility + runtime recommendations per catalog entry, with GPU profile metadata exposed to the UI
+- Manage everything from the `mllm` CLI (contexts, status checks, catalog browsing) with more commands arriving over the next phases, including runtime controls (`mllm runtime status|activate|deactivate|switch`) and curated playbooks (`mllm playbooks list|get|apply|run`)
 - Query the same data via a GraphQL endpoint (`/graphql`) for UI dashboards or automation clients
 
 ## Environment Variables
@@ -56,6 +57,7 @@ HTTP API service for dynamically managing KServe InferenceServices based on mode
 
 - `GET /healthz` - Health check
 - `GET /system/info` - Service metadata (version, catalog counts, PVC paths, GPU profiles, recent jobs/history)
+- `GET /system/summary` - Aggregated dashboard summary (weights usage, job counts, queue depth, alerts) used by the CLI/dashboard
 - `GET /openapi` / `GET /docs` - Machine-readable OpenAPI document and Swagger UI
 - `GET /metrics` - Prometheus metrics (request counts, durations, PVC usage)
 - `GET /models` - List available models (cached)
@@ -64,6 +66,9 @@ HTTP API service for dynamically managing KServe InferenceServices based on mode
 - `GET /models/{id}/compatibility` - Estimate if the catalog entry fits on a GPU type (or all known GPUs)
 - `POST /models/activate` - Activate a model (body: `{"id": "model-id"}`)
 - `POST /models/deactivate` - Deactivate the active model
+- `POST /runtime/activate` - Activate a model with additional deployment metadata (strategy, traffic hints); preferred endpoint for the CLI/UI
+- `POST /runtime/deactivate` - Gracefully deactivate the runtime (same semantics as `/models/deactivate` with richer responses)
+- `POST /runtime/promote` - Blue/green style promotion endpoint (verify current model before switching)
 - `POST /models/test` - Dry-run the InferenceService manifest (and optional readiness URL ping)
 - `GET /active` - Get information about the currently active model
 - `POST /refresh` - Manually force catalog reload
@@ -75,6 +80,24 @@ HTTP API service for dynamically managing KServe InferenceServices based on mode
 - `GET /huggingface/search` - Proxy Hugging Face search for vLLM-friendly results
 - `GET /huggingface/models/{id}` - Fetch Hugging Face metadata + compatibility info (GET variant of `/vllm/model-info`)
 - `GET|POST /graphql` - GraphQL endpoint exposing models, jobs, runtime status, and cached Hugging Face metadata
+- `GET /system/info` - Used by the `mllm status` CLI command for quick diagnostics
+
+## CLI (`mllm`)
+
+The native CLI is in early phases but already supports:
+
+```bash
+mllm config set-context dev --server https://model-manager-api.example.com --token $MM_TOKEN
+mllm config use-context dev
+mllm status
+mllm models list -o table
+```
+
+See [`docs/performance-overhaul.md`](docs/performance-overhaul.md) for the full roadmap.
+- `mllm jobs cancel <id>` / `mllm jobs retry <id> [--watch]` / `mllm jobs logs <id> [--follow]` for job lifecycle control + log streaming
+- `mllm status` automatically falls back to the new `/system/summary` endpoint for Docker-Desktop-style dashboards (and still supports the legacy `/system/info` payload if the summary route is unavailable)
+- `mllm runtime activate|deactivate|status|switch` wrap the new `/runtime/*` endpoints for direct runtime control (with `--watch` to stream lifecycle SSE events)
+- `mllm playbooks list|get|apply|run` lets you version reusable install/activate workflows. `mllm playbooks run <name> --watch --auto-activate` streams long-running installs and optionally promotes the model once the job completes.
 - `GET /recommendations/{gpuType}` - Suggested vLLM flags/notes for the GPU profile
 - `GET /recommendations/profiles` - List known GPU profiles (useful for UI dropdowns)
 - `GET /weights` - List all installed weight directories
@@ -85,6 +108,9 @@ HTTP API service for dynamically managing KServe InferenceServices based on mode
   - Response includes the `storageUri` (`pvc://...`) and `inferenceModelPath` you can paste directly into the catalog entry (`MODEL_ID` env) so the runtime loads the cached copy. When async mode is enabled the endpoint returns `202 Accepted` plus a `job` object you can poll below.
 - `GET /weights/install/status/{id}` - Convenience alias for checking install job status
 - `GET /jobs` / `GET /jobs/{id}` - Inspect asynchronous work (weight installs, etc.)
+- `GET /jobs/{id}/logs` - Fetch structured log entries for a job (and stream live updates via SSE)
+- `POST /jobs/{id}/cancel` - Cancel a pending or running job
+- `POST /jobs/{id}/retry` - Retry a failed/cancelled job (respects max attempt count)
 - `GET /history` - Fetch recent install/activation/deletion events for UI timelines
 - `GET /vllm/supported-models` - List vLLM-supported architectures scraped from GitHub
 - `GET /vllm/model/{architecture}` - Fetch source/template metadata for a single vLLM runtime class
@@ -104,3 +130,6 @@ pip install -r requirements.txt
 export MODEL_CATALOG_ROOT=/path/to/ol-model-catalog
 uvicorn app.main:app --host 0.0.0.0 --port 8080
 ```
+- `GET /playbooks` / `GET /playbooks/{name}` - List or fetch stored install/activate playbooks
+- `PUT /playbooks/{name}` / `DELETE /playbooks/{name}` - Manage playbook definitions (JSON or YAML payloads)
+- `POST /playbooks/{name}/run` - Execute the configured steps (install, optional activation) and receive job IDs / pending actions for the CLI/UI
