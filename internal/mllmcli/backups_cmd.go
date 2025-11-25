@@ -49,9 +49,12 @@ var backupsListCmd = &cobra.Command{
 }
 
 var (
-	backupType     string
-	backupLocation string
-	backupNotes    string
+	backupType            string
+	backupLocation        string
+	backupNotes           string
+	backupRestoreID       string
+	backupRestoreLocation string
+	backupRestoreNotes    string
 )
 
 var backupsRecordCmd = &cobra.Command{
@@ -88,13 +91,68 @@ var backupsRecordCmd = &cobra.Command{
 	},
 }
 
+var backupsRunCmd = &cobra.Command{
+	Use:   "run",
+	Short: "Trigger a backup run",
+	Run: func(cmd *cobra.Command, args []string) {
+		if backupType == "" || backupLocation == "" {
+			exitWithError(cmd, fmt.Errorf("--type and --location are required"))
+			return
+		}
+		client, _, err := mustClient()
+		if err != nil {
+			exitWithError(cmd, err)
+			return
+		}
+		payload := map[string]string{"type": backupType, "location": backupLocation, "notes": backupNotes}
+		if err := client.PostJSON("/backups/run", payload, nil); err != nil {
+			exitWithError(cmd, err)
+			return
+		}
+		fmt.Fprintln(cmd.OutOrStdout(), "Backup job recorded.")
+	},
+}
+
+var backupsRestoreCmd = &cobra.Command{
+	Use:   "restore",
+	Short: "Record a restore request",
+	Run: func(cmd *cobra.Command, args []string) {
+		if backupRestoreLocation == "" {
+			exitWithError(cmd, fmt.Errorf("--restore-location is required"))
+			return
+		}
+		client, _, err := mustClient()
+		if err != nil {
+			exitWithError(cmd, err)
+			return
+		}
+		payload := map[string]string{"location": backupRestoreLocation, "notes": backupRestoreNotes}
+		if backupRestoreID != "" {
+			payload["id"] = backupRestoreID
+		}
+		if err := client.PostJSON("/backups/restore", payload, nil); err != nil {
+			exitWithError(cmd, err)
+			return
+		}
+		fmt.Fprintln(cmd.OutOrStdout(), "Restore request submitted.")
+	},
+}
+
 func init() {
 	backupsRecordCmd.Flags().StringVar(&backupType, "type", "manual", "Backup type label")
 	backupsRecordCmd.Flags().StringVar(&backupLocation, "location", "", "Location (PVC, S3 path, etc.)")
 	backupsRecordCmd.Flags().StringVar(&backupNotes, "notes", "", "Optional notes")
+	backupsRunCmd.Flags().StringVar(&backupType, "type", "manual", "Backup type label")
+	backupsRunCmd.Flags().StringVar(&backupLocation, "location", "", "Location (PVC, S3 path, etc.)")
+	backupsRunCmd.Flags().StringVar(&backupNotes, "notes", "", "Optional notes")
+	backupsRestoreCmd.Flags().StringVar(&backupRestoreID, "restore-id", "", "Backup identifier to restore")
+	backupsRestoreCmd.Flags().StringVar(&backupRestoreLocation, "restore-location", "", "Location of backup to restore")
+	backupsRestoreCmd.Flags().StringVar(&backupRestoreNotes, "restore-notes", "", "Restore notes")
 
 	backupsCmd.AddCommand(backupsListCmd)
 	backupsCmd.AddCommand(backupsRecordCmd)
+	backupsCmd.AddCommand(backupsRunCmd)
+	backupsCmd.AddCommand(backupsRestoreCmd)
 }
 
 type Backup struct {

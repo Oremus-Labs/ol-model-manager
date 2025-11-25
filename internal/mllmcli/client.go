@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 )
@@ -76,6 +77,14 @@ func (c *Client) GetBinary(path string) ([]byte, error) {
 		return nil, fmt.Errorf("%s %s failed: %s", req.Method, req.URL.Path, resp.Status)
 	}
 	return io.ReadAll(resp.Body)
+}
+
+func (c *Client) DownloadToFile(path, dest string) error {
+	data, err := c.GetBinary(path)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(dest, data, 0o644)
 }
 
 func (c *Client) post(path string, body io.Reader, target interface{}) error {

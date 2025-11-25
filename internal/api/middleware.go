@@ -3,8 +3,6 @@ package api
 import (
 	"fmt"
 	"log"
-	"net/http"
-	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -51,28 +49,5 @@ func metricsMiddleware() gin.HandlerFunc {
 		status := fmt.Sprintf("%d", c.Writer.Status())
 		httpRequestsTotal.WithLabelValues(c.Request.Method, path, status).Inc()
 		httpRequestDuration.WithLabelValues(c.Request.Method, path).Observe(latency)
-	}
-}
-
-func authMiddleware(token string) gin.HandlerFunc {
-	if token == "" {
-		return func(c *gin.Context) {
-			c.Next()
-		}
-	}
-	return func(c *gin.Context) {
-		header := c.GetHeader("Authorization")
-		if strings.HasPrefix(header, "Bearer ") {
-			header = strings.TrimSpace(strings.TrimPrefix(header, "Bearer "))
-		}
-		if header == "" {
-			header = c.GetHeader("X-API-Key")
-		}
-
-		if header != token {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
-			return
-		}
-		c.Next()
 	}
 }

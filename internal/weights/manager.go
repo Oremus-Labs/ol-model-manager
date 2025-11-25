@@ -239,6 +239,30 @@ func (m *Manager) Delete(modelName string) error {
 	return nil
 }
 
+// PruneOlderThan deletes cached weights that have not been modified within the provided age.
+func (m *Manager) PruneOlderThan(maxAge time.Duration) ([]string, error) {
+	if maxAge <= 0 {
+		return nil, nil
+	}
+	cutoff := time.Now().Add(-maxAge)
+	weights, err := m.List()
+	if err != nil {
+		return nil, err
+	}
+	var removed []string
+	for _, info := range weights {
+		if info.ModifiedTime.After(cutoff) {
+			continue
+		}
+		if err := m.Delete(info.Name); err != nil {
+			log.Printf("weights: failed to prune %s: %v", info.Name, err)
+			continue
+		}
+		removed = append(removed, info.Name)
+	}
+	return removed, nil
+}
+
 // GetStats returns overall storage statistics.
 func (m *Manager) GetStats() (*StorageStats, error) {
 	weights, err := m.List()

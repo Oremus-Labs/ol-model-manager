@@ -50,9 +50,11 @@ var notifyListCmd = &cobra.Command{
 }
 
 var (
-	notifyAddType   string
-	notifyAddTarget string
-	notifyAddMeta   []string
+	notifyAddType      string
+	notifyAddTarget    string
+	notifyAddMeta      []string
+	notifyRotateTarget string
+	notifyRotateMeta   []string
 )
 
 var notifyAddCmd = &cobra.Command{
@@ -92,6 +94,42 @@ var notifyAddCmd = &cobra.Command{
 			return
 		}
 		fmt.Fprintf(cmd.OutOrStdout(), "Channel %s -> %s configured.\n", record.Name, record.Target)
+	},
+}
+
+var notifyRotateCmd = &cobra.Command{
+	Use:   "rotate <name>",
+	Short: "Rotate credentials for a notification channel",
+	Args:  cobra.ExactArgs(1),
+	Run: func(cmd *cobra.Command, args []string) {
+		if notifyRotateTarget == "" {
+			exitWithError(cmd, fmt.Errorf("--target is required"))
+			return
+		}
+		client, _, err := mustClient()
+		if err != nil {
+			exitWithError(cmd, err)
+			return
+		}
+		meta, err := parseKeyValuePairs(notifyRotateMeta)
+		if err != nil {
+			exitWithError(cmd, err)
+			return
+		}
+		payload := map[string]interface{}{"target": notifyRotateTarget, "metadata": meta}
+		var record Notification
+		if err := client.PostJSON("/notifications/"+args[0]+"/rotate", payload, &record); err != nil {
+			exitWithError(cmd, err)
+			return
+		}
+		if err := writeOutput(cmd, record); err != nil {
+			exitWithError(cmd, err)
+			return
+		}
+		if outputFormat == "json" {
+			return
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "Channel %s rotated.\n", args[0])
 	},
 }
 
@@ -196,12 +234,15 @@ func init() {
 	notifyAddCmd.Flags().StringVar(&notifyAddType, "type", "slack-webhook", "Channel type (slack-webhook, webhook, etc.)")
 	notifyAddCmd.Flags().StringVar(&notifyAddTarget, "target", "", "Channel target URL or identifier")
 	notifyAddCmd.Flags().StringSliceVar(&notifyAddMeta, "meta", nil, "key=value metadata pairs (repeatable)")
+	notifyRotateCmd.Flags().StringVar(&notifyRotateTarget, "target", "", "New target URL or identifier")
+	notifyRotateCmd.Flags().StringSliceVar(&notifyRotateMeta, "meta", nil, "key=value metadata pairs (repeatable)")
 	notifyDeleteCmd.Flags().BoolVar(&notifyDeleteForce, "yes", false, "Skip confirmation prompt")
 	notifyTestCmd.Flags().StringVar(&notifyTestMessage, "message", "Model Manager notification test", "Message body to send")
 	notifyHistoryCmd.Flags().IntVar(&notifyHistoryLimit, "limit", 20, "Number of history entries to return")
 
 	notifyCmd.AddCommand(notifyListCmd)
 	notifyCmd.AddCommand(notifyAddCmd)
+	notifyCmd.AddCommand(notifyRotateCmd)
 	notifyCmd.AddCommand(notifyDeleteCmd)
 	notifyCmd.AddCommand(notifyTestCmd)
 	notifyCmd.AddCommand(notifyHistoryCmd)

@@ -38,7 +38,7 @@ import (
 )
 
 const (
-	version         = "0.5.22-go"
+	version         = "0.5.23-go"
 	shutdownTimeout = 5 * time.Second
 )
 
@@ -258,6 +258,15 @@ func main() {
 	})
 
 	startWeightMonitor(rootCtx, weightManager)
+	startAutomation(rootCtx, automationOptions{
+		Store:      stateStore,
+		Weights:    weightManager,
+		Handler:    h,
+		Interval:   cfg.AutomationCleanupInterval,
+		JobTTL:     cfg.AutomationJobTTL,
+		HistoryTTL: cfg.AutomationHistoryTTL,
+		WeightTTL:  cfg.AutomationWeightTTL,
+	})
 
 	// Setup HTTP server
 	var gqlHandler http.Handler

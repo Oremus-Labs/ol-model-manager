@@ -41,16 +41,25 @@ var tokensListCmd = &cobra.Command{
 			return
 		}
 		tw := newTable()
-		fmt.Fprintf(tw, "ID\tNAME\tSCOPES\tCREATED\n")
+		fmt.Fprintf(tw, "ID\tNAME\tSCOPES\tCREATED\tEXPIRES\tLAST USED\n")
 		for _, token := range resp.Tokens {
-			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", token.ID, token.Name, strings.Join(token.Scopes, ","), formatTimestamp(token.CreatedAt))
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
+				token.ID,
+				token.Name,
+				strings.Join(token.Scopes, ","),
+				formatTimestamp(token.CreatedAt),
+				formatOptionalTime(token.ExpiresAt),
+				formatOptionalTime(token.LastUsedAt),
+			)
 		}
 		flushTable(tw)
 	},
 }
 
 var (
-	tokenScopes []string
+	tokenScopes  []string
+	tokenTTL     string
+	tokenExpires string
 )
 
 var tokensIssueCmd = &cobra.Command{
@@ -68,12 +77,19 @@ var tokensIssueCmd = &cobra.Command{
 			"name":   args[0],
 			"scopes": scopes,
 		}
+		if tokenTTL != "" {
+			payload["ttl"] = tokenTTL
+		}
+		if tokenExpires != "" {
+			payload["expiresAt"] = tokenExpires
+		}
 		var resp struct {
-			Token     string    `json:"token"`
-			TokenID   string    `json:"tokenId"`
-			Name      string    `json:"name"`
-			Scopes    []string  `json:"scopes"`
-			CreatedAt time.Time `json:"createdAt"`
+			Token     string     `json:"token"`
+			TokenID   string     `json:"tokenId"`
+			Name      string     `json:"name"`
+			Scopes    []string   `json:"scopes"`
+			CreatedAt time.Time  `json:"createdAt"`
+			ExpiresAt *time.Time `json:"expiresAt"`
 		}
 		if err := client.PostJSON("/tokens", payload, &resp); err != nil {
 			exitWithError(cmd, err)
@@ -88,6 +104,9 @@ var tokensIssueCmd = &cobra.Command{
 		}
 		fmt.Fprintf(cmd.OutOrStdout(), "Token ID: %s\n", resp.TokenID)
 		fmt.Fprintf(cmd.OutOrStdout(), "Plain token (store securely, only shown once):\n%s\n", resp.Token)
+		if resp.ExpiresAt != nil {
+			fmt.Fprintf(cmd.OutOrStdout(), "Expires: %s\n", formatTimestamp(*resp.ExpiresAt))
+		}
 	},
 }
 
@@ -124,6 +143,8 @@ var tokensRevokeCmd = &cobra.Command{
 
 func init() {
 	tokensIssueCmd.Flags().StringSliceVar(&tokenScopes, "scope", nil, "Scope assigned to the token (repeatable)")
+	tokensIssueCmd.Flags().StringVar(&tokenTTL, "ttl", "", "Token TTL (e.g. 720h)")
+	tokensIssueCmd.Flags().StringVar(&tokenExpires, "expires-at", "", "Explicit expiration timestamp (RFC3339)")
 	tokensRevokeCmd.Flags().BoolVar(&tokensRevokeForce, "yes", false, "Skip confirmation prompt")
 
 	tokensCmd.AddCommand(tokensListCmd)
@@ -132,10 +153,12 @@ func init() {
 }
 
 type APIToken struct {
-	ID        string    `json:"id"`
-	Name      string    `json:"name"`
-	Scopes    []string  `json:"scopes"`
-	CreatedAt time.Time `json:"createdAt"`
+	ID         string     `json:"id"`
+	Name       string     `json:"name"`
+	Scopes     []string   `json:"scopes"`
+	CreatedAt  time.Time  `json:"createdAt"`
+	ExpiresAt  *time.Time `json:"expiresAt"`
+	LastUsedAt *time.Time `json:"lastUsedAt"`
 }
 
 func normalizeScopeArgs(scopes []string) []string {

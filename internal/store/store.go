@@ -77,13 +77,24 @@ type Notification struct {
 	UpdatedAt time.Time         `json:"updatedAt"`
 }
 
+// NotificationStats captures aggregate delivery health for dashboards.
+type NotificationStats struct {
+	Channels  int        `json:"channels"`
+	Delivered int        `json:"delivered"`
+	Failed    int        `json:"failed"`
+	Tested    int        `json:"tested"`
+	LastEvent *time.Time `json:"lastEvent,omitempty"`
+}
+
 // APIToken represents an issued token with optional scopes.
 type APIToken struct {
-	ID        string    `json:"id"`
-	Name      string    `json:"name"`
-	Scopes    []string  `json:"scopes,omitempty"`
-	CreatedAt time.Time `json:"createdAt"`
-	Hash      string    `json:"-"`
+	ID         string     `json:"id"`
+	Name       string     `json:"name"`
+	Scopes     []string   `json:"scopes,omitempty"`
+	CreatedAt  time.Time  `json:"createdAt"`
+	ExpiresAt  *time.Time `json:"expiresAt,omitempty"`
+	LastUsedAt *time.Time `json:"lastUsedAt,omitempty"`
+	Hash       string     `json:"-"`
 }
 
 // Policy stores arbitrary policy documents.
@@ -91,6 +102,14 @@ type Policy struct {
 	Name      string    `json:"name"`
 	Document  string    `json:"document"`
 	UpdatedAt time.Time `json:"updatedAt"`
+}
+
+// PolicyVersion captures immutable revisions for rollback.
+type PolicyVersion struct {
+	Name      string    `json:"name"`
+	Version   int       `json:"version"`
+	Document  string    `json:"document"`
+	CreatedAt time.Time `json:"createdAt"`
 }
 
 // Backup represents a recorded backup snapshot.
@@ -204,13 +223,22 @@ func initSchema(db *sql.DB, driver string) error {
 			name TEXT NOT NULL,
 			hash TEXT NOT NULL,
 			scopes TEXT,
-			created_at TIMESTAMP NOT NULL
+			created_at TIMESTAMP NOT NULL,
+			expires_at TIMESTAMP,
+			last_used_at TIMESTAMP
 		);`
 	policiesTable := `CREATE TABLE IF NOT EXISTS policies (
-			name TEXT PRIMARY KEY,
-			document TEXT NOT NULL,
-			updated_at TIMESTAMP NOT NULL
-		);`
+		name TEXT PRIMARY KEY,
+		document TEXT NOT NULL,
+		updated_at TIMESTAMP NOT NULL
+	);`
+	policyVersionsTable := `CREATE TABLE IF NOT EXISTS policy_versions (
+		name TEXT NOT NULL,
+		version INTEGER NOT NULL,
+		document TEXT NOT NULL,
+		created_at TIMESTAMP NOT NULL,
+		PRIMARY KEY (name, version)
+	);`
 	playbooksTable := `CREATE TABLE IF NOT EXISTS playbooks (
 			name TEXT PRIMARY KEY,
 			description TEXT,
@@ -269,13 +297,22 @@ func initSchema(db *sql.DB, driver string) error {
 			name TEXT NOT NULL,
 			hash TEXT NOT NULL,
 			scopes TEXT,
-			created_at TIMESTAMPTZ NOT NULL
+			created_at TIMESTAMPTZ NOT NULL,
+			expires_at TIMESTAMPTZ,
+			last_used_at TIMESTAMPTZ
 		);`
 		policiesTable = `CREATE TABLE IF NOT EXISTS policies (
-			name TEXT PRIMARY KEY,
-			document TEXT NOT NULL,
-			updated_at TIMESTAMPTZ NOT NULL
-		);`
+		name TEXT PRIMARY KEY,
+		document TEXT NOT NULL,
+		updated_at TIMESTAMPTZ NOT NULL
+	);`
+		policyVersionsTable = `CREATE TABLE IF NOT EXISTS policy_versions (
+		name TEXT NOT NULL,
+		version INTEGER NOT NULL,
+		document TEXT NOT NULL,
+		created_at TIMESTAMPTZ NOT NULL,
+		PRIMARY KEY (name, version)
+	);`
 		playbooksTable = `CREATE TABLE IF NOT EXISTS playbooks (
 			name TEXT PRIMARY KEY,
 			description TEXT,
@@ -301,6 +338,7 @@ func initSchema(db *sql.DB, driver string) error {
 		notificationsTable,
 		tokensTable,
 		policiesTable,
+		policyVersionsTable,
 		playbooksTable,
 		backupsTable,
 		`CREATE TABLE IF NOT EXISTS catalog_cache (
@@ -321,6 +359,8 @@ func initSchema(db *sql.DB, driver string) error {
 			`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS max_attempts INTEGER DEFAULT 1`,
 			`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMPTZ`,
 			`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS logs TEXT`,
+			`ALTER TABLE api_tokens ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ`,
+			`ALTER TABLE api_tokens ADD COLUMN IF NOT EXISTS last_used_at TIMESTAMPTZ`,
 		}
 	} else {
 		alterStatements = []string{
@@ -328,6 +368,8 @@ func initSchema(db *sql.DB, driver string) error {
 			`ALTER TABLE jobs ADD COLUMN max_attempts INTEGER DEFAULT 1`,
 			`ALTER TABLE jobs ADD COLUMN cancelled_at TIMESTAMP`,
 			`ALTER TABLE jobs ADD COLUMN logs TEXT`,
+			`ALTER TABLE api_tokens ADD COLUMN expires_at TIMESTAMP`,
+			`ALTER TABLE api_tokens ADD COLUMN last_used_at TIMESTAMP`,
 		}
 	}
 	for _, stmt := range alterStatements {
@@ -760,6 +802,29 @@ func (s *Store) DeleteJobs(status string) error {
 	return err
 }
 
+// CleanupJobsBefore removes completed jobs older than the provided timestamp.
+func (s *Store) CleanupJobsBefore(ts time.Time, statuses ...JobStatus) (int64, error) {
+	if s == nil || s.db == nil {
+		return 0, errors.New("datastore not configured")
+	}
+	query := "DELETE FROM jobs WHERE updated_at < ?"
+	args := []interface{}{ts}
+	if len(statuses) > 0 {
+		placeholders := make([]string, 0, len(statuses))
+		for _, st := range statuses {
+			placeholders = append(placeholders, "?")
+			args = append(args, st)
+		}
+		query += " AND status IN (" + strings.Join(placeholders, ",") + ")"
+	}
+	res, err := s.db.Exec(s.rebind(query), args...)
+	if err != nil {
+		return 0, err
+	}
+	rows, _ := res.RowsAffected()
+	return rows, nil
+}
+
 // ClearHistory deletes all history entries.
 func (s *Store) ClearHistory() error {
 	if s == nil || s.db == nil {
@@ -767,6 +832,19 @@ func (s *Store) ClearHistory() error {
 	}
 	_, err := s.db.Exec("DELETE FROM history")
 	return err
+}
+
+// CleanupHistoryBefore deletes entries older than the provided timestamp.
+func (s *Store) CleanupHistoryBefore(ts time.Time) (int64, error) {
+	if s == nil || s.db == nil {
+		return 0, errors.New("datastore not configured")
+	}
+	res, err := s.db.Exec(s.rebind(`DELETE FROM history WHERE created_at < ?`), ts)
+	if err != nil {
+		return 0, err
+	}
+	rows, _ := res.RowsAffected()
+	return rows, nil
 }
 
 // SaveCatalogSnapshot persists the catalog contents for reuse when git-sync is cold.
@@ -862,6 +940,61 @@ func (s *Store) ListNotifications() ([]Notification, error) {
 	return channels, nil
 }
 
+// GetNotification returns a single channel by name.
+func (s *Store) GetNotification(name string) (*Notification, error) {
+	if s == nil || s.db == nil {
+		return nil, errors.New("datastore not configured")
+	}
+	var rec Notification
+	var metadata sql.NullString
+	row := s.db.QueryRow(s.rebind(`SELECT name, type, target, metadata, created_at, updated_at FROM notifications WHERE name = ?`), name)
+	if err := row.Scan(&rec.Name, &rec.Type, &rec.Target, &metadata, &rec.CreatedAt, &rec.UpdatedAt); err != nil {
+		return nil, err
+	}
+	if metadata.Valid && metadata.String != "" {
+		_ = json.Unmarshal([]byte(metadata.String), &rec.Metadata)
+	}
+	return &rec, nil
+}
+
+// NotificationHealth aggregates delivery stats across history.
+func (s *Store) NotificationHealth() (NotificationStats, error) {
+	stats := NotificationStats{}
+	if s == nil || s.db == nil {
+		return stats, errors.New("datastore not configured")
+	}
+	row := s.db.QueryRow(`SELECT COUNT(*) FROM notifications`)
+	_ = row.Scan(&stats.Channels)
+	rows, err := s.db.Query(`SELECT event, COUNT(*), MAX(created_at) FROM history WHERE event IN ('notification_test','notification_delivery','notification_failed') GROUP BY event`)
+	if err != nil {
+		return stats, err
+	}
+	defer rows.Close()
+	var latest time.Time
+	for rows.Next() {
+		var event string
+		var count int
+		var last time.Time
+		if err := rows.Scan(&event, &count, &last); err != nil {
+			return stats, err
+		}
+		switch event {
+		case "notification_test":
+			stats.Tested = count
+		case "notification_delivery":
+			stats.Delivered = count
+		case "notification_failed":
+			stats.Failed = count
+		}
+		if last.After(latest) {
+			copy := last
+			latest = last
+			stats.LastEvent = &copy
+		}
+	}
+	return stats, rows.Err()
+}
+
 // DeleteNotification removes a notification channel.
 func (s *Store) DeleteNotification(name string) error {
 	if s == nil || s.db == nil {
@@ -889,8 +1022,8 @@ func (s *Store) CreateAPIToken(t *APIToken) error {
 		t.CreatedAt = time.Now().UTC()
 	}
 	scopeStr := strings.Join(t.Scopes, ",")
-	_, err := s.db.Exec(s.rebind(`INSERT INTO api_tokens (id, name, hash, scopes, created_at) VALUES (?, ?, ?, ?, ?)`),
-		t.ID, t.Name, t.Hash, scopeStr, t.CreatedAt)
+	_, err := s.db.Exec(s.rebind(`INSERT INTO api_tokens (id, name, hash, scopes, created_at, expires_at, last_used_at) VALUES (?, ?, ?, ?, ?, ?, ?)`),
+		t.ID, t.Name, t.Hash, scopeStr, t.CreatedAt, t.ExpiresAt, t.LastUsedAt)
 	return err
 }
 
@@ -899,7 +1032,7 @@ func (s *Store) ListAPITokens() ([]APIToken, error) {
 	if s == nil || s.db == nil {
 		return nil, errors.New("datastore not configured")
 	}
-	rows, err := s.db.Query(`SELECT id, name, scopes, created_at FROM api_tokens ORDER BY created_at DESC`)
+	rows, err := s.db.Query(`SELECT id, name, scopes, created_at, expires_at, last_used_at FROM api_tokens ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -908,11 +1041,20 @@ func (s *Store) ListAPITokens() ([]APIToken, error) {
 	for rows.Next() {
 		var rec APIToken
 		var scopes sql.NullString
-		if err := rows.Scan(&rec.ID, &rec.Name, &scopes, &rec.CreatedAt); err != nil {
+		var expires, lastUsed sql.NullTime
+		if err := rows.Scan(&rec.ID, &rec.Name, &scopes, &rec.CreatedAt, &expires, &lastUsed); err != nil {
 			return nil, err
 		}
 		if scopes.Valid && scopes.String != "" {
 			rec.Scopes = strings.Split(scopes.String, ",")
+		}
+		if expires.Valid {
+			t := expires.Time
+			rec.ExpiresAt = &t
+		}
+		if lastUsed.Valid {
+			t := lastUsed.Time
+			rec.LastUsedAt = &t
 		}
 		tokens = append(tokens, rec)
 	}
@@ -936,18 +1078,48 @@ func (s *Store) DeleteAPIToken(id string) error {
 
 // ValidateAPITokenHash checks whether a hash exists.
 func (s *Store) ValidateAPITokenHash(hash string) (bool, error) {
-	if s == nil || s.db == nil {
-		return false, errors.New("datastore not configured")
-	}
-	var id string
-	err := s.db.QueryRow(s.rebind(`SELECT id FROM api_tokens WHERE hash = ? LIMIT 1`), hash).Scan(&id)
-	if err != nil {
+	if _, err := s.LookupAPITokenByHash(hash); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return false, nil
 		}
 		return false, err
 	}
 	return true, nil
+}
+
+// LookupAPITokenByHash returns a token record for the provided hash.
+func (s *Store) LookupAPITokenByHash(hash string) (*APIToken, error) {
+	if s == nil || s.db == nil {
+		return nil, errors.New("datastore not configured")
+	}
+	var rec APIToken
+	var scopes sql.NullString
+	var expires, lastUsed sql.NullTime
+	row := s.db.QueryRow(s.rebind(`SELECT id, name, scopes, created_at, expires_at, last_used_at FROM api_tokens WHERE hash = ? LIMIT 1`), hash)
+	if err := row.Scan(&rec.ID, &rec.Name, &scopes, &rec.CreatedAt, &expires, &lastUsed); err != nil {
+		return nil, err
+	}
+	if scopes.Valid && scopes.String != "" {
+		rec.Scopes = strings.Split(scopes.String, ",")
+	}
+	if expires.Valid {
+		t := expires.Time
+		rec.ExpiresAt = &t
+	}
+	if lastUsed.Valid {
+		t := lastUsed.Time
+		rec.LastUsedAt = &t
+	}
+	return &rec, nil
+}
+
+// TouchAPIToken updates the last-used timestamp for a token.
+func (s *Store) TouchAPIToken(id string) error {
+	if s == nil || s.db == nil {
+		return errors.New("datastore not configured")
+	}
+	_, err := s.db.Exec(s.rebind(`UPDATE api_tokens SET last_used_at = ? WHERE id = ?`), time.Now().UTC(), id)
+	return err
 }
 
 // UpsertPolicy stores or updates a policy document.
@@ -961,11 +1133,92 @@ func (s *Store) UpsertPolicy(p *Policy) error {
 	if p.UpdatedAt.IsZero() {
 		p.UpdatedAt = time.Now().UTC()
 	}
+	if current, err := s.GetPolicy(p.Name); err == nil && current != nil && current.Document != "" {
+		_ = s.snapshotPolicyVersion(current)
+	}
 	query := s.rebind(`INSERT INTO policies (name, document, updated_at)
 		VALUES (?, ?, ?)
 		ON CONFLICT(name) DO UPDATE SET document=excluded.document, updated_at=excluded.updated_at`)
 	_, err := s.db.Exec(query, p.Name, p.Document, p.UpdatedAt)
 	return err
+}
+
+// GetPolicy returns a stored policy by name.
+func (s *Store) GetPolicy(name string) (*Policy, error) {
+	if s == nil || s.db == nil {
+		return nil, errors.New("datastore not configured")
+	}
+	row := s.db.QueryRow(s.rebind(`SELECT name, document, updated_at FROM policies WHERE name = ?`), name)
+	var policy Policy
+	if err := row.Scan(&policy.Name, &policy.Document, &policy.UpdatedAt); err != nil {
+		return nil, err
+	}
+	return &policy, nil
+}
+
+func (s *Store) snapshotPolicyVersion(p *Policy) error {
+	if p == nil || p.Name == "" {
+		return nil
+	}
+	var version int
+	_ = s.db.QueryRow(s.rebind(`SELECT COALESCE(MAX(version), 0) FROM policy_versions WHERE name = ?`), p.Name).Scan(&version)
+	version++
+	created := p.UpdatedAt
+	if created.IsZero() {
+		created = time.Now().UTC()
+	}
+	_, err := s.db.Exec(s.rebind(`INSERT INTO policy_versions (name, version, document, created_at) VALUES (?, ?, ?, ?)`),
+		p.Name, version, p.Document, created)
+	return err
+}
+
+// ListPolicyVersions returns previous revisions for a policy.
+func (s *Store) ListPolicyVersions(name string, limit int) ([]PolicyVersion, error) {
+	if s == nil || s.db == nil {
+		return nil, errors.New("datastore not configured")
+	}
+	if limit <= 0 {
+		limit = 10
+	}
+	rows, err := s.db.Query(s.rebind(`SELECT version, document, created_at FROM policy_versions WHERE name = ? ORDER BY version DESC LIMIT ?`), name, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var versions []PolicyVersion
+	for rows.Next() {
+		var v PolicyVersion
+		v.Name = name
+		if err := rows.Scan(&v.Version, &v.Document, &v.CreatedAt); err != nil {
+			return nil, err
+		}
+		versions = append(versions, v)
+	}
+	return versions, rows.Err()
+}
+
+// RollbackPolicy restores a prior revision.
+func (s *Store) RollbackPolicy(name string, version int) (*Policy, error) {
+	if s == nil || s.db == nil {
+		return nil, errors.New("datastore not configured")
+	}
+	query := `SELECT version, document, created_at FROM policy_versions WHERE name = ?`
+	args := []interface{}{name}
+	if version > 0 {
+		query += " AND version = ?"
+		args = append(args, version)
+	}
+	query += " ORDER BY version DESC LIMIT 1"
+	row := s.db.QueryRow(s.rebind(query), args...)
+	var selected PolicyVersion
+	if err := row.Scan(&selected.Version, &selected.Document, &selected.CreatedAt); err != nil {
+		return nil, err
+	}
+	policy := &Policy{Name: name, Document: selected.Document, UpdatedAt: time.Now().UTC()}
+	if err := s.UpsertPolicy(policy); err != nil {
+		return nil, err
+	}
+	return policy, nil
 }
 
 // ListPolicies returns stored policies.
@@ -1014,9 +1267,13 @@ func GenerateToken(length int) (string, string, error) {
 		return "", "", err
 	}
 	plain := base64.RawURLEncoding.EncodeToString(buf)
-	sum := sha256.Sum256([]byte(plain))
-	hash := base64.RawURLEncoding.EncodeToString(sum[:])
-	return plain, hash, nil
+	return plain, HashToken(plain), nil
+}
+
+// HashToken returns the persistent hash for a plaintext token.
+func HashToken(value string) string {
+	sum := sha256.Sum256([]byte(value))
+	return base64.RawURLEncoding.EncodeToString(sum[:])
 }
 
 // RecordBackup stores metadata for a backup run.

@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/csv"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,6 +22,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/PaesslerAG/jsonpath"
 	"github.com/gin-contrib/sse"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -157,6 +159,47 @@ type Handler struct {
 	catalogStatus      string
 	catalogCacheTime   time.Time
 	pvcAlertActive     bool
+}
+
+// AuthMiddleware enforces either the static token or datastore-issued tokens.
+func (h *Handler) AuthMiddleware(staticToken string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		token := strings.TrimSpace(getBearerToken(c))
+		if token == "" {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+			return
+		}
+		if staticToken != "" && token == staticToken {
+			c.Next()
+			return
+		}
+		if h.store != nil {
+			rec, err := h.store.LookupAPITokenByHash(store.HashToken(token))
+			if err == nil && rec != nil {
+				if rec.ExpiresAt != nil && time.Now().After(*rec.ExpiresAt) {
+					c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "token expired"})
+					return
+				}
+				_ = h.store.TouchAPIToken(rec.ID)
+				c.Set("apiTokenId", rec.ID)
+				c.Set("apiTokenName", rec.Name)
+				c.Next()
+				return
+			}
+		}
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+	}
+}
+
+func getBearerToken(c *gin.Context) string {
+	header := c.GetHeader("Authorization")
+	if strings.HasPrefix(header, "Bearer ") {
+		header = strings.TrimSpace(strings.TrimPrefix(header, "Bearer "))
+	}
+	if header == "" {
+		header = c.GetHeader("X-API-Key")
+	}
+	return header
 }
 
 type requestError struct {
@@ -562,6 +605,9 @@ func (h *Handler) MetricsSummary(c *gin.Context) {
 	if runtime, ok := summary["runtime"]; ok {
 		resp["runtime"] = runtime
 	}
+	if notifications, ok := summary["notifications"]; ok {
+		resp["notifications"] = notifications
+	}
 	if stats != nil && stats.TotalBytes > 0 {
 		resp["weightsUsagePercent"] = float64(stats.UsedBytes) / float64(stats.TotalBytes) * 100
 	}
@@ -636,6 +682,11 @@ func (h *Handler) buildSystemSummary(ctx context.Context) (gin.H, *weights.Stora
 	}
 
 	summary["alerts"] = h.collectAlerts(storageStats)
+	if h.store != nil {
+		if notif, err := h.store.NotificationHealth(); err == nil {
+			summary["notifications"] = notif
+		}
+	}
 
 	return summary, storageStats
 }
@@ -1821,6 +1872,47 @@ func (h *Handler) NotificationHistory(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"history": filtered})
 }
 
+// RotateNotification updates a channel target to refresh credentials safely.
+func (h *Handler) RotateNotification(c *gin.Context) {
+	if h.store == nil {
+		c.JSON(http.StatusNotImplemented, gin.H{"error": "persistent store not configured"})
+		return
+	}
+	name := strings.TrimSpace(c.Param("name"))
+	if name == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "name is required"})
+		return
+	}
+	record, err := h.store.GetNotification(name)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "notification not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load notification"})
+		return
+	}
+	var req rotateNotificationRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if strings.TrimSpace(req.Target) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "target is required"})
+		return
+	}
+	record.Target = req.Target
+	if len(req.Metadata) > 0 {
+		record.Metadata = req.Metadata
+	}
+	if err := h.store.UpsertNotification(record); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to rotate notification"})
+		return
+	}
+	h.recordHistory("notification_rotated", "", map[string]interface{}{"name": name})
+	c.JSON(http.StatusOK, record)
+}
+
 func (h *Handler) ensureSecretManager(c *gin.Context) bool {
 	if h.secrets == nil {
 		c.JSON(http.StatusNotImplemented, gin.H{"error": "secret management is disabled"})
@@ -1882,6 +1974,23 @@ func (h *Handler) IssueToken(c *gin.Context) {
 		return
 	}
 	validScopes := normalizeScopes(req.Scopes)
+	var expiresAt *time.Time
+	if req.ExpiresAt != "" {
+		if ts, err := time.Parse(time.RFC3339, req.ExpiresAt); err == nil {
+			expiresAt = &ts
+		} else {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid expiresAt timestamp"})
+			return
+		}
+	} else if req.TTL != "" {
+		if ttl, err := time.ParseDuration(req.TTL); err == nil {
+			future := time.Now().Add(ttl)
+			expiresAt = &future
+		} else {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid ttl duration"})
+			return
+		}
+	}
 	plain, hash, err := store.GenerateToken(32)
 	if err != nil {
 		log.Printf("Failed to generate token: %v", err)
@@ -1894,6 +2003,7 @@ func (h *Handler) IssueToken(c *gin.Context) {
 		Scopes:    validScopes,
 		Hash:      hash,
 		CreatedAt: time.Now().UTC(),
+		ExpiresAt: expiresAt,
 	}
 	if err := h.store.CreateAPIToken(record); err != nil {
 		log.Printf("Failed to store API token: %v", err)
@@ -1907,6 +2017,7 @@ func (h *Handler) IssueToken(c *gin.Context) {
 		"name":      record.Name,
 		"scopes":    record.Scopes,
 		"createdAt": record.CreatedAt,
+		"expiresAt": record.ExpiresAt,
 	})
 }
 
@@ -2009,6 +2120,122 @@ func (h *Handler) ApplyPolicy(c *gin.Context) {
 	c.JSON(http.StatusOK, policy)
 }
 
+// GetPolicy returns a single policy.
+func (h *Handler) GetPolicy(c *gin.Context) {
+	if h.store == nil {
+		c.JSON(http.StatusNotImplemented, gin.H{"error": "persistent store not configured"})
+		return
+	}
+	name := strings.TrimSpace(c.Param("name"))
+	if name == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "name is required"})
+		return
+	}
+	policy, err := h.store.GetPolicy(name)
+	if err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, sql.ErrNoRows) {
+			status = http.StatusNotFound
+		}
+		c.JSON(status, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, policy)
+}
+
+// ListPolicyVersions exposes prior revisions for rollback.
+func (h *Handler) ListPolicyVersions(c *gin.Context) {
+	if h.store == nil {
+		c.JSON(http.StatusNotImplemented, gin.H{"error": "persistent store not configured"})
+		return
+	}
+	name := strings.TrimSpace(c.Param("name"))
+	if name == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "name is required"})
+		return
+	}
+	limit := parseLimit(c, "limit", 5, 25)
+	versions, err := h.store.ListPolicyVersions(name, limit)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"versions": versions})
+}
+
+// LintPolicy validates that the supplied document is valid JSON.
+func (h *Handler) LintPolicy(c *gin.Context) {
+	var req policyRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if !json.Valid([]byte(req.Document)) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "policy document must be valid JSON"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "ok"})
+}
+
+// PolicyBundle returns all policies packaged as a zip.
+func (h *Handler) PolicyBundle(c *gin.Context) {
+	if h.store == nil {
+		c.JSON(http.StatusNotImplemented, gin.H{"error": "persistent store not configured"})
+		return
+	}
+	policies, err := h.store.ListPolicies()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	buf := &bytes.Buffer{}
+	zw := zip.NewWriter(buf)
+	for _, policy := range policies {
+		name := fmt.Sprintf("policies/%s.json", policy.Name)
+		if err := writeJSONToZip(zw, name, policy); err != nil {
+			zw.Close()
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+	}
+	if err := zw.Close(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.Header("Content-Type", "application/zip")
+	c.Header("Content-Disposition", "attachment; filename=policies.zip")
+	c.Writer.Write(buf.Bytes())
+}
+
+// RollbackPolicy restores an older revision.
+func (h *Handler) RollbackPolicy(c *gin.Context) {
+	if h.store == nil {
+		c.JSON(http.StatusNotImplemented, gin.H{"error": "persistent store not configured"})
+		return
+	}
+	name := strings.TrimSpace(c.Param("name"))
+	if name == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "name is required"})
+		return
+	}
+	var req rollbackPolicyRequest
+	if err := c.ShouldBindJSON(&req); err != nil && err != io.EOF {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	policy, err := h.store.RollbackPolicy(name, req.Version)
+	if err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, sql.ErrNoRows) {
+			status = http.StatusNotFound
+		}
+		c.JSON(status, gin.H{"error": err.Error()})
+		return
+	}
+	h.recordHistory("policy_rolled_back", "", map[string]interface{}{"name": name, "version": req.Version})
+	c.JSON(http.StatusOK, policy)
+}
+
 // DeletePolicy removes a policy by name.
 func (h *Handler) DeletePolicy(c *gin.Context) {
 	if h.store == nil {
@@ -2076,6 +2303,12 @@ func (h *Handler) RecordBackup(c *gin.Context) {
 	c.JSON(http.StatusCreated, rec)
 }
 
+// RunBackup is an alias for RecordBackup for orchestration verbs.
+func (h *Handler) RunBackup(c *gin.Context) {
+	h.RecordBackup(c)
+	return
+}
+
 // CleanupWeights removes the provided cached weight directories.
 func (h *Handler) CleanupWeights(c *gin.Context) {
 	if h.weights == nil {
@@ -2107,6 +2340,32 @@ func (h *Handler) CleanupWeights(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"results": results})
 }
 
+// RestoreBackup records a restore request for auditing.
+func (h *Handler) RestoreBackup(c *gin.Context) {
+	if h.store == nil {
+		c.JSON(http.StatusNotImplemented, gin.H{"error": "persistent store not configured"})
+		return
+	}
+	var req restoreBackupRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if strings.TrimSpace(req.Location) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "location is required"})
+		return
+	}
+	meta := map[string]interface{}{"location": req.Location}
+	if req.ID != "" {
+		meta["id"] = req.ID
+	}
+	if req.Notes != "" {
+		meta["notes"] = req.Notes
+	}
+	h.recordHistory("backup_restore_requested", "", meta)
+	c.JSON(http.StatusAccepted, gin.H{"status": "scheduled"})
+}
+
 type notificationRequest struct {
 	Message string `json:"message"`
 }
@@ -2116,9 +2375,16 @@ type notificationConfigRequest struct {
 	Metadata map[string]string `json:"metadata"`
 }
 
+type rotateNotificationRequest struct {
+	Target   string            `json:"target" binding:"required"`
+	Metadata map[string]string `json:"metadata"`
+}
+
 type issueTokenRequest struct {
-	Name   string   `json:"name" binding:"required"`
-	Scopes []string `json:"scopes"`
+	Name      string   `json:"name" binding:"required"`
+	Scopes    []string `json:"scopes"`
+	TTL       string   `json:"ttl"`
+	ExpiresAt string   `json:"expiresAt"`
 }
 
 type policyRequest struct {
@@ -2133,6 +2399,16 @@ type backupRequest struct {
 
 type cleanupWeightsRequest struct {
 	Names []string `json:"names" binding:"required"`
+}
+
+type restoreBackupRequest struct {
+	ID       string `json:"id"`
+	Location string `json:"location"`
+	Notes    string `json:"notes"`
+}
+
+type rollbackPolicyRequest struct {
+	Version int `json:"version"`
 }
 
 // TestNotification sends a one-off notification via the configured channel.
@@ -2152,9 +2428,11 @@ func (h *Handler) TestNotification(c *gin.Context) {
 	}
 	if err := postSlackMessage(h.opts.SlackWebhookURL, message); err != nil {
 		log.Printf("Failed to send notification: %v", err)
+		h.recordHistory("notification_failed", "", map[string]interface{}{"message": message, "error": err.Error()})
 		c.JSON(http.StatusBadGateway, gin.H{"error": "failed to deliver notification"})
 		return
 	}
+	h.recordHistory("notification_delivery", "", map[string]interface{}{"message": message})
 	h.recordHistory("notification_test", "", map[string]interface{}{"message": message})
 	c.JSON(http.StatusOK, gin.H{"status": "sent"})
 }
@@ -2686,7 +2964,31 @@ func (h *Handler) ListHistory(c *gin.Context) {
 			entries = filtered
 		}
 	}
-	c.JSON(http.StatusOK, gin.H{"events": entries})
+	output := interface{}(entries)
+	jsonPath := strings.TrimSpace(c.Query("jsonpath"))
+	if jsonPath != "" {
+		payload, err := marshalForJSONPath(map[string]interface{}{"events": entries})
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "failed to prepare payload"})
+			return
+		}
+		result, err := jsonpath.Get(jsonPath, payload)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("jsonpath error: %v", err)})
+			return
+		}
+		if converted, ok := coerceHistoryEntries(result); ok {
+			entries = converted
+			output = entries
+		} else {
+			output = result
+		}
+	}
+	if strings.EqualFold(c.Query("format"), "csv") {
+		writeHistoryCSV(c, entries)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"events": output})
 }
 
 // ListProfiles exposes GPU profiles for the frontend.
@@ -2824,6 +3126,57 @@ func modelDisplayName(model *catalog.Model) string {
 		return model.DisplayName
 	}
 	return model.ID
+}
+
+func marshalForJSONPath(value interface{}) (interface{}, error) {
+	var payload interface{}
+	data, err := json.Marshal(value)
+	if err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return nil, err
+	}
+	return payload, nil
+}
+
+func coerceHistoryEntries(value interface{}) ([]store.HistoryEntry, bool) {
+	switch typed := value.(type) {
+	case []interface{}:
+		var entries []store.HistoryEntry
+		data, err := json.Marshal(typed)
+		if err != nil {
+			return nil, false
+		}
+		if err := json.Unmarshal(data, &entries); err != nil {
+			return nil, false
+		}
+		return entries, true
+	case map[string]interface{}:
+		var entry store.HistoryEntry
+		data, err := json.Marshal(typed)
+		if err != nil {
+			return nil, false
+		}
+		if err := json.Unmarshal(data, &entry); err != nil {
+			return nil, false
+		}
+		return []store.HistoryEntry{entry}, true
+	default:
+		return nil, false
+	}
+}
+
+func writeHistoryCSV(c *gin.Context, entries []store.HistoryEntry) {
+	c.Header("Content-Type", "text/csv")
+	c.Header("Content-Disposition", "attachment; filename=history.csv")
+	writer := csv.NewWriter(c.Writer)
+	defer writer.Flush()
+	_ = writer.Write([]string{"timestamp", "event", "modelId", "metadata"})
+	for _, entry := range entries {
+		metaBytes, _ := json.Marshal(entry.Metadata)
+		_ = writer.Write([]string{entry.CreatedAt.Format(time.RFC3339), entry.Event, entry.ModelID, string(metaBytes)})
+	}
 }
 
 func (h *Handler) recordHistory(event, modelID string, meta map[string]interface{}) {

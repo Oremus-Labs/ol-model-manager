@@ -51,6 +51,10 @@ type Config struct {
 	HuggingFaceSyncPipelineTags []string
 	HuggingFaceSyncSearchTerms  []string
 	HuggingFaceSyncLimit        int
+	AutomationCleanupInterval   time.Duration
+	AutomationJobTTL            time.Duration
+	AutomationHistoryTTL        time.Duration
+	AutomationWeightTTL         time.Duration
 
 	// Redis / events configuration
 	RedisAddr        string
@@ -128,22 +132,26 @@ func Load() *Config {
 			"phi",
 			"deepseek",
 		}),
-		HuggingFaceSyncLimit: getEnvInt("HUGGINGFACE_SYNC_LIMIT", 50),
-		RedisAddr:            getEnv("REDIS_ADDR", ""),
-		RedisUsername:        getEnv("REDIS_USERNAME", ""),
-		RedisPassword:        os.Getenv("REDIS_PASSWORD"),
-		RedisDB:              getEnvInt("REDIS_DB", 0),
-		RedisTLSEnabled:      getEnvBool("REDIS_TLS_ENABLED", false),
-		RedisTLSInsecure:     getEnvBool("REDIS_TLS_INSECURE_SKIP_VERIFY", false),
-		EventsChannel:        getEnv("EVENTS_CHANNEL", "model-manager-events"),
-		RedisJobStream:       getEnv("REDIS_JOB_STREAM", "model-manager:jobs"),
-		RedisJobGroup:        getEnv("REDIS_JOB_GROUP", "weights-workers"),
-		HuggingFaceToken:     os.Getenv("HUGGINGFACE_API_TOKEN"),
-		GitHubToken:          os.Getenv("GITHUB_TOKEN"),
-		GitAuthorName:        getEnv("GIT_AUTHOR_NAME", ""),
-		GitAuthorEmail:       getEnv("GIT_AUTHOR_EMAIL", ""),
-		APIToken:             os.Getenv("MODEL_MANAGER_API_TOKEN"),
-		SlackWebhookURL:      os.Getenv("SLACK_WEBHOOK_URL"),
+		HuggingFaceSyncLimit:      getEnvInt("HUGGINGFACE_SYNC_LIMIT", 50),
+		AutomationCleanupInterval: getEnvDuration("AUTOMATION_CLEANUP_INTERVAL", 6*time.Hour),
+		AutomationJobTTL:          getEnvDuration("AUTOMATION_JOB_TTL", 72*time.Hour),
+		AutomationHistoryTTL:      getEnvDuration("AUTOMATION_HISTORY_TTL", 14*24*time.Hour),
+		AutomationWeightTTL:       getEnvDuration("AUTOMATION_WEIGHT_TTL", 30*24*time.Hour),
+		RedisAddr:                 getEnv("REDIS_ADDR", ""),
+		RedisUsername:             getEnv("REDIS_USERNAME", ""),
+		RedisPassword:             os.Getenv("REDIS_PASSWORD"),
+		RedisDB:                   getEnvInt("REDIS_DB", 0),
+		RedisTLSEnabled:           getEnvBool("REDIS_TLS_ENABLED", false),
+		RedisTLSInsecure:          getEnvBool("REDIS_TLS_INSECURE_SKIP_VERIFY", false),
+		EventsChannel:             getEnv("EVENTS_CHANNEL", "model-manager-events"),
+		RedisJobStream:            getEnv("REDIS_JOB_STREAM", "model-manager:jobs"),
+		RedisJobGroup:             getEnv("REDIS_JOB_GROUP", "weights-workers"),
+		HuggingFaceToken:          os.Getenv("HUGGINGFACE_API_TOKEN"),
+		GitHubToken:               os.Getenv("GITHUB_TOKEN"),
+		GitAuthorName:             getEnv("GIT_AUTHOR_NAME", ""),
+		GitAuthorEmail:            getEnv("GIT_AUTHOR_EMAIL", ""),
+		APIToken:                  os.Getenv("MODEL_MANAGER_API_TOKEN"),
+		SlackWebhookURL:           os.Getenv("SLACK_WEBHOOK_URL"),
 	}
 }
 

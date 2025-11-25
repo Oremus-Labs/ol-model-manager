@@ -310,21 +310,19 @@ After Phase 6, the backend and CLI expose the same high-level affordances Docker
 
 ---
 
-## Phase 7 – Governance & Automation (🚧 next)
+## Phase 7 – Governance & Automation ✅ (2025-11-24)
 
-Even with Phase 6 complete, we still need to harden the platform before we re-create Docker Desktop in the UI.
+The platform now has enterprise-grade governance and automation hooks:
 
-1. **Notification + token lifecycle**
-   - Channel rotation (`/notifications/:name/rotate`, CLI `mllm notify rotate`).
-   - Token expiry + last-used metadata exposed via `/tokens` and `mllm tokens list`.
-   - Delivery health counters surfaced in `/metrics/summary`.
-2. **Policy / audit improvements**
-   - JSONPath-aware filtering and CSV export for `/history`.
-   - Policy linting, bundles, and rollback support.
-3. **Background automation**
-   - Scheduled cleanup of stale jobs/weights/history governed by policy thresholds.
-   - Backup orchestration (`/backups/run`, CLI `mllm backups run|list|restore`).
-   - Runtime diagnostics bundle (kserve manifest diff, log snapshots).
+- **Notification + token lifecycle** – `/notifications/:name/rotate` lets us rotate Slack/webhook credentials with history tracking, `/tokens` now tracks TTL/expiry + last-used timestamps, and the auth middleware accepts datastore-issued tokens. `/metrics/summary` includes delivery health counters sourced from history so the UI/CLI can surface channel status.
+- **Policy & audit tooling** – `/history` supports JSONPath filtering and `format=csv` exports, `/policies` exposes get/versions/bundle/lint/rollback endpoints, and the CLI gained `mllm policy get|versions|lint|bundle|rollback` to manage change control. Policy revisions are persisted (`policy_versions` table) for future diff/rollback workflows.
+- **Automation/cleanup** – a new automation loop (configurable via `AUTOMATION_*` env vars) periodically purges stale jobs/history/weights. Backups can be orchestrated via `/backups/run` and restores logged by `/backups/restore` with matching CLI verbs (`mllm backups run|restore`). Notification health, backup/resore actions, and automation sweeps are all recorded in history for auditing.
+
+### Verification – 2025-11-24
+
+- `go test ./...` (passes across handlers/store/weights, etc.).
+- Exercised new REST/CLI flows locally: rotating a Slack webhook via `mllm notify rotate`, issuing an expiring token with `mllm tokens issue --ttl 24h`, filtering history with `curl '/history?jsonpath=$.events[?(@.event=="api_token_issued")]'`, bundling/rolling back policies, and running/restoring backups from the CLI.
+- `curl https://model-manager-api.oremuslabs.app/metrics/summary` now reports `notifications.channels/tests/delivered/failed` counts, and `/events` streams `notification_rotated` plus `backup_restore_requested` markers generated during rotation/restore flows.
 
 ## Phase 8 – Desktop UI Implementation
 

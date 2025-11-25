@@ -211,6 +211,13 @@ func formatTimestamp(t time.Time) string {
 	return t.UTC().Format(time.RFC3339)
 }
 
+func formatOptionalTime(t *time.Time) string {
+	if t == nil {
+		return "-"
+	}
+	return formatTimestamp(*t)
+}
+
 type SecretMeta struct {
 	Name      string    `json:"name"`
 	Keys      []string  `json:"keys"`
