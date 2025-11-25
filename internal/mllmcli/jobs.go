@@ -225,7 +225,9 @@ func watchJob(ctx context.Context, cmd *cobra.Command, client *Client, jobID str
 			return true
 		}
 
-		err := client.StreamEvents(ctx, handler)
+		streamCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		err := client.StreamEvents(streamCtx, handler)
+		cancel()
 		if err != nil && !errors.Is(err, context.Canceled) {
 			printErrorLine("event stream interrupted: %v", err)
 		}
