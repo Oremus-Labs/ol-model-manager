@@ -35,6 +35,7 @@ func NewServer(handler *handlers.Handler, opts Options) *Server {
 	engine.GET("/docs", handler.APIDocs)
 	engine.GET("/events", handler.StreamEvents)
 	engine.GET("/metrics", gin.WrapH(promhttp.Handler()))
+	engine.GET("/search", handler.Search)
 
 	// Models
 	engine.GET("/models", handler.ListModels)
@@ -113,6 +114,7 @@ func NewServer(handler *handlers.Handler, opts Options) *Server {
 	protected.GET("/backups", handler.ListBackups)
 	protected.POST("/backups", handler.RecordBackup)
 	protected.POST("/cleanup/weights", handler.CleanupWeights)
+	protected.GET("/support/bundle", handler.SupportBundle)
 
 	return &Server{engine: engine}
 }

@@ -21,7 +21,9 @@ HTTP API service for dynamically managing KServe InferenceServices based on mode
 - Validate catalog entries against the shared schema, PVC/secret availability, and GPU capacity
 - Dry-run KServe activations (and optional readiness probes) before flipping production traffic
 - Estimate GPU compatibility + runtime recommendations per catalog entry, with GPU profile metadata exposed to the UI
-- Manage everything from the `mllm` CLI (contexts, status checks, catalog browsing) with more commands arriving over the next phases, including runtime controls (`mllm runtime status|activate|deactivate|switch`) and curated playbooks (`mllm playbooks list|get|apply|run`)
+- Search across catalog models, cached weights, jobs, Hugging Face metadata, and notifications from a single `/search` endpoint (and `mllm search`)
+- Generate downloadable support bundles (`/support/bundle`, `mllm support bundle`) capturing summary, runtime status, history, jobs, notifications, and Prometheus metrics
+- Manage everything from the `mllm` CLI (contexts, status checks, catalog browsing) with more commands arriving over the next phases, including runtime controls (`mllm runtime status|activate|deactivate|switch`), curated playbooks (`mllm playbooks list|get|apply|run`), global search, and support tooling
 - Query the same data via a GraphQL endpoint (`/graphql`) for UI dashboards or automation clients
 
 ## Environment Variables
@@ -91,6 +93,8 @@ mllm config set-context dev --server https://model-manager-api.example.com --tok
 mllm config use-context dev
 mllm status
 mllm models list -o table
+mllm search Qwen --type models --limit 5
+mllm support bundle --output ./support-bundle.zip
 ```
 
 See [`docs/performance-overhaul.md`](docs/performance-overhaul.md) for the full roadmap.
@@ -98,6 +102,8 @@ See [`docs/performance-overhaul.md`](docs/performance-overhaul.md) for the full 
 - `mllm status` automatically falls back to the new `/system/summary` endpoint for Docker-Desktop-style dashboards (and still supports the legacy `/system/info` payload if the summary route is unavailable)
 - `mllm runtime activate|deactivate|status|switch` wrap the new `/runtime/*` endpoints for direct runtime control (with `--watch` to stream lifecycle SSE events)
 - `mllm playbooks list|get|apply|run` lets you version reusable install/activate workflows. `mllm playbooks run <name> --watch --auto-activate` streams long-running installs and optionally promotes the model once the job completes.
+- `mllm search` hits `/search` so you can discover catalog models, cached weights, jobs, Hugging Face cache entries, and notification channels from a single command (with suggested next actions and `--type` filters).
+- `mllm support bundle` downloads the `/support/bundle` archive—summary, runtime status, job snapshots, history, notifications, metrics—for quick handoff to support or archival.
 - `GET /recommendations/{gpuType}` - Suggested vLLM flags/notes for the GPU profile
 - `GET /recommendations/profiles` - List known GPU profiles (useful for UI dropdowns)
 - `GET /weights` - List all installed weight directories

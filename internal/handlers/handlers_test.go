@@ -1,9 +1,12 @@
 package handlers
 
 import (
+	"archive/zip"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -16,6 +19,7 @@ import (
 	"github.com/oremus-labs/ol-model-manager/internal/catalog"
 	"github.com/oremus-labs/ol-model-manager/internal/catalogwriter"
 	"github.com/oremus-labs/ol-model-manager/internal/recommendations"
+	"github.com/oremus-labs/ol-model-manager/internal/status"
 	"github.com/oremus-labs/ol-model-manager/internal/store"
 	"github.com/oremus-labs/ol-model-manager/internal/vllm"
 	"github.com/oremus-labs/ol-model-manager/internal/weights"
@@ -591,6 +595,104 @@ func TestSearchHuggingFaceUsesCache(t *testing.T) {
 	}
 }
 
+func TestSearchEndpointReturnsModelResult(t *testing.T) {
+	t.Parallel()
+
+	cat := catalog.New("", "")
+	cat.Restore([]*catalog.Model{
+		{ID: "demo-model", DisplayName: "Demo Model", HFModelID: "org/demo"},
+	})
+
+	handler := New(cat, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, Options{})
+	handler.lastCatalogRefresh = time.Now()
+	handler.catalogStatus = "test"
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/search?q=demo&type=models", nil)
+	c, _ := gin.CreateTestContext(w)
+	c.Request = req
+
+	handler.Search(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 got %d body=%s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Results []map[string]interface{} `json:"results"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(resp.Results) == 0 {
+		t.Fatalf("expected search results")
+	}
+	if resp.Results[0]["type"] != "models" {
+		t.Fatalf("unexpected search type %v", resp.Results[0])
+	}
+}
+
+func TestSupportBundleEndpoint(t *testing.T) {
+	t.Parallel()
+
+	stateStore := openTestStore(t)
+	if err := stateStore.CreateJob(&store.Job{ID: "bundle-job", Type: "weight_install"}); err != nil {
+		t.Fatalf("CreateJob: %v", err)
+	}
+	if err := stateStore.AppendHistory(&store.HistoryEntry{Event: "test"}); err != nil {
+		t.Fatalf("AppendHistory: %v", err)
+	}
+
+	catalogRef := catalog.New("", "")
+
+	handler := New(catalogRef, nil, &fakeWeightStore{
+		listResp: []weights.WeightInfo{{Name: "demo-weight", HFModelID: "org/demo"}},
+		statsResp: &weights.StorageStats{
+			TotalBytes: 1024,
+		},
+	}, nil, nil, nil, nil, stateStore, nil, nil, nil, &fakeHFCache{
+		list: []vllm.HuggingFaceModel{{ID: "org/demo", ModelID: "org/demo"}},
+	}, &fakeRuntimeStatus{status: status.RuntimeStatus{}}, nil, Options{
+		Version:        "test-version",
+		WeightsPVCName: "venus-model-storage",
+		WeightsPath:    "/mnt/models",
+	})
+	handler.lastCatalogRefresh = time.Now()
+	handler.catalogStatus = "test"
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/support/bundle", nil)
+	c, _ := gin.CreateTestContext(w)
+	c.Request = req
+
+	handler.SupportBundle(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 got %d body=%s", w.Code, w.Body.String())
+	}
+	reader, err := zip.NewReader(bytes.NewReader(w.Body.Bytes()), int64(w.Body.Len()))
+	if err != nil {
+		t.Fatalf("zip reader: %v", err)
+	}
+	var summaryFound bool
+	for _, f := range reader.File {
+		if f.Name == "summary.json" {
+			rc, err := f.Open()
+			if err != nil {
+				t.Fatalf("open summary: %v", err)
+			}
+			content, _ := io.ReadAll(rc)
+			rc.Close()
+			if !strings.Contains(string(content), "test-version") {
+				t.Fatalf("summary missing version")
+			}
+			summaryFound = true
+			break
+		}
+	}
+	if !summaryFound {
+		t.Fatalf("summary not found in bundle")
+	}
+}
+
 type fakeWeightStore struct {
 	listResp        []weights.WeightInfo
 	getResp         *weights.WeightInfo
@@ -749,6 +851,14 @@ func (f *fakeAdvisor) Profiles() []recommendations.GPUProfile {
 	return []recommendations.GPUProfile{
 		{Name: "test-gpu", MemoryGB: 32},
 	}
+}
+
+type fakeRuntimeStatus struct {
+	status status.RuntimeStatus
+}
+
+func (f *fakeRuntimeStatus) CurrentStatus() status.RuntimeStatus {
+	return f.status
 }
 
 func newTempStore(t *testing.T) *store.Store {

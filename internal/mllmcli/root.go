@@ -70,6 +70,8 @@ func init() {
 	rootCmd.AddCommand(cleanupCmd)
 	rootCmd.AddCommand(secretsCmd)
 	rootCmd.AddCommand(playbooksCmd)
+	rootCmd.AddCommand(searchCmd)
+	rootCmd.AddCommand(supportCmd)
 	rootCmd.AddCommand(configCmd)
 }
 

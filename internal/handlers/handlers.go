@@ -2,6 +2,7 @@
 package handlers
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
 	"database/sql"
@@ -39,6 +40,8 @@ import (
 	"github.com/oremus-labs/ol-model-manager/internal/validator"
 	"github.com/oremus-labs/ol-model-manager/internal/vllm"
 	"github.com/oremus-labs/ol-model-manager/internal/weights"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/common/expfmt"
 	"sigs.k8s.io/yaml"
 )
 
@@ -242,6 +245,18 @@ func New(cat *catalog.Catalog, ks *kserve.Client, wm weightStore, vdisc discover
 		lastCatalogRefresh: time.Time{},
 		catalogStatus:      "unknown",
 	}
+}
+
+var defaultSearchTypes = []string{"models", "weights", "jobs", "hf_models", "notifications"}
+
+type searchResult struct {
+	Type        string                 `json:"type"`
+	ID          string                 `json:"id"`
+	Name        string                 `json:"name"`
+	Description string                 `json:"description,omitempty"`
+	Score       int                    `json:"score"`
+	Metadata    map[string]interface{} `json:"metadata,omitempty"`
+	NextActions []string               `json:"nextActions,omitempty"`
 }
 
 type activateRequest struct {
@@ -528,6 +543,14 @@ func (h *Handler) SystemInfo(c *gin.Context) {
 
 // SystemSummary aggregates key metrics for dashboards.
 func (h *Handler) SystemSummary(c *gin.Context) {
+	summary, _ := h.buildSystemSummary(c.Request.Context())
+	c.JSON(http.StatusOK, summary)
+}
+
+func (h *Handler) buildSystemSummary(ctx context.Context) (gin.H, *weights.StorageStats) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	summary := gin.H{
 		"version":   h.opts.Version,
 		"timestamp": time.Now().UTC(),
@@ -562,23 +585,18 @@ func (h *Handler) SystemSummary(c *gin.Context) {
 		summary["runtime"] = h.runtime.CurrentStatus()
 	}
 
+	jobCard := gin.H{}
 	if h.store != nil {
 		if counts, err := h.store.CountJobsByStatus(); err == nil {
-			jobCard := gin.H{}
 			for status, count := range counts {
 				jobCard[string(status)] = count
 			}
-			summary["jobs"] = jobCard
 		}
-	} else {
-		summary["jobs"] = gin.H{}
 	}
-	if _, ok := summary["jobs"]; !ok {
-		summary["jobs"] = gin.H{}
-	}
+	summary["jobs"] = jobCard
 
 	if h.queue != nil {
-		if depth, err := h.queue.Length(c.Request.Context()); err == nil {
+		if depth, err := h.queue.Length(ctx); err == nil {
 			summary["queue"] = gin.H{"depth": depth}
 		}
 	}
@@ -587,7 +605,7 @@ func (h *Handler) SystemSummary(c *gin.Context) {
 	}
 
 	if h.hfCache != nil {
-		if models, err := h.hfCache.List(c.Request.Context()); err == nil {
+		if models, err := h.hfCache.List(ctx); err == nil {
 			summary["huggingface"] = gin.H{"cachedModels": len(models)}
 		}
 	}
@@ -597,7 +615,7 @@ func (h *Handler) SystemSummary(c *gin.Context) {
 
 	summary["alerts"] = h.collectAlerts(storageStats)
 
-	c.JSON(http.StatusOK, summary)
+	return summary, storageStats
 }
 
 func (h *Handler) observeQueueDepth(ctx context.Context) {
@@ -619,6 +637,89 @@ func durationString(d time.Duration) string {
 		return ""
 	}
 	return d.String()
+}
+
+// Search aggregates fuzzy matches across catalog models, weights, jobs, HF cache entries, and notifications.
+func (h *Handler) Search(c *gin.Context) {
+	query := strings.TrimSpace(c.Query("q"))
+	if query == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "query (q) is required"})
+		return
+	}
+	terms := tokenizeQuery(query)
+	if len(terms) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "query (q) is required"})
+		return
+	}
+
+	activeTypes := normalizeSearchTypes(c.QueryArray("type"))
+	globalLimit := parseLimit(c, "limit", 20, 100)
+	perTypeLimit := parseLimit(c, "perType", 5, globalLimit)
+
+	results := make([]searchResult, 0)
+
+	if activeTypes["models"] {
+		results = append(results, h.searchCatalogModels(terms, perTypeLimit)...)
+	}
+	if activeTypes["weights"] {
+		results = append(results, h.searchWeights(terms, perTypeLimit)...)
+	}
+	if activeTypes["jobs"] {
+		results = append(results, h.searchJobs(terms, perTypeLimit)...)
+	}
+	if activeTypes["hf_models"] {
+		results = append(results, h.searchHFModels(c.Request.Context(), terms, perTypeLimit)...)
+	}
+	if activeTypes["notifications"] {
+		results = append(results, h.searchNotifications(terms, perTypeLimit)...)
+	}
+
+	sort.Slice(results, func(i, j int) bool {
+		if results[i].Score == results[j].Score {
+			if results[i].Type == results[j].Type {
+				return results[i].Name < results[j].Name
+			}
+			return results[i].Type < results[j].Type
+		}
+		return results[i].Score > results[j].Score
+	})
+	if len(results) > globalLimit {
+		results = results[:globalLimit]
+	}
+
+	typesList := make([]string, 0, len(activeTypes))
+	for t := range activeTypes {
+		typesList = append(typesList, t)
+	}
+	sort.Strings(typesList)
+
+	h.recordHistory("search_performed", "", map[string]interface{}{
+		"query":   query,
+		"types":   typesList,
+		"results": len(results),
+	})
+
+	c.JSON(http.StatusOK, gin.H{"results": results})
+}
+
+// SupportBundle packages recent state (summary, jobs, history, metrics) into a downloadable archive.
+func (h *Handler) SupportBundle(c *gin.Context) {
+	filename := fmt.Sprintf("support-bundle-%s.zip", time.Now().UTC().Format("20060102-150405"))
+	buf, err := h.buildSupportBundle(c.Request.Context())
+	if err != nil {
+		log.Printf("failed to build support bundle: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to build support bundle"})
+		return
+	}
+
+	h.recordHistory("support_bundle", "", map[string]interface{}{
+		"filename": filename,
+		"size":     buf.Len(),
+	})
+
+	c.Header("Content-Type", "application/zip")
+	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", filename))
+	c.Data(http.StatusOK, "application/zip", buf.Bytes())
 }
 
 // OpenAPISpec serves the OpenAPI document.
@@ -3136,4 +3237,366 @@ func (h *Handler) fetchAndValidateHFModel(id string) (*vllm.HuggingFaceModel, er
 	}
 
 	return model, nil
+}
+
+func normalizeSearchTypes(values []string) map[string]bool {
+	types := make(map[string]bool)
+	if len(values) == 0 {
+		for _, t := range defaultSearchTypes {
+			types[t] = true
+		}
+		return types
+	}
+	for _, raw := range values {
+		t := strings.ToLower(strings.TrimSpace(raw))
+		for _, allowed := range defaultSearchTypes {
+			if t == allowed {
+				types[t] = true
+				break
+			}
+		}
+	}
+	if len(types) == 0 {
+		for _, t := range defaultSearchTypes {
+			types[t] = true
+		}
+	}
+	return types
+}
+
+func tokenizeQuery(query string) []string {
+	q := strings.TrimSpace(strings.ToLower(query))
+	if q == "" {
+		return nil
+	}
+	terms := strings.Fields(q)
+	if len(terms) == 0 {
+		terms = []string{q}
+	}
+	return terms
+}
+
+func scoreMatch(terms []string, fields ...string) int {
+	if len(terms) == 0 {
+		return 0
+	}
+	score := 0
+	for _, term := range terms {
+		if term == "" {
+			continue
+		}
+		termScore := 0
+		for _, field := range fields {
+			if field == "" {
+				continue
+			}
+			if strings.Contains(strings.ToLower(field), term) {
+				termScore = 1
+				break
+			}
+		}
+		score += termScore
+	}
+	return score
+}
+
+func (h *Handler) searchCatalogModels(terms []string, limit int) []searchResult {
+	if err := h.ensureCatalogFresh(false); err != nil || h.catalog == nil {
+		return nil
+	}
+	matches := make([]searchResult, 0, limit)
+	for _, model := range h.catalog.All() {
+		score := scoreMatch(terms, model.ID, model.DisplayName, model.HFModelID, model.StorageURI)
+		if score == 0 {
+			continue
+		}
+		metadata := map[string]interface{}{
+			"hfModelId":  model.HFModelID,
+			"runtime":    model.Runtime,
+			"storageUri": model.StorageURI,
+		}
+		result := searchResult{
+			Type:        "models",
+			ID:          model.ID,
+			Name:        modelDisplayName(model),
+			Description: fmt.Sprintf("%s (runtime=%s)", model.ID, stringOrDefault(model.Runtime, "vllm-runtime")),
+			Score:       score,
+			Metadata:    metadata,
+			NextActions: []string{
+				fmt.Sprintf("mllm models get %s", model.ID),
+				fmt.Sprintf("mllm runtime activate %s --wait", model.ID),
+			},
+		}
+		matches = append(matches, result)
+		if len(matches) >= limit {
+			break
+		}
+	}
+	return matches
+}
+
+func (h *Handler) searchWeights(terms []string, limit int) []searchResult {
+	if h.weights == nil {
+		return nil
+	}
+	infos, err := h.weights.List()
+	if err != nil {
+		return nil
+	}
+	matches := make([]searchResult, 0, limit)
+	for _, info := range infos {
+		score := scoreMatch(terms, info.Name, info.HFModelID, info.Path)
+		if score == 0 {
+			continue
+		}
+		metadata := map[string]interface{}{
+			"hfModelId": info.HFModelID,
+			"path":      info.Path,
+			"sizeHuman": info.SizeHuman,
+		}
+		next := []string{
+			fmt.Sprintf("mllm weights info %s", info.Name),
+		}
+		if info.HFModelID != "" {
+			next = append(next, fmt.Sprintf("mllm weights install %s --target %s --overwrite", info.HFModelID, info.Name))
+		}
+		matches = append(matches, searchResult{
+			Type:        "weights",
+			ID:          info.Name,
+			Name:        info.Name,
+			Description: fmt.Sprintf("%s (%s)", info.Path, info.SizeHuman),
+			Score:       score,
+			Metadata:    metadata,
+			NextActions: next,
+		})
+		if len(matches) >= limit {
+			break
+		}
+	}
+	return matches
+}
+
+func (h *Handler) searchJobs(terms []string, limit int) []searchResult {
+	if h.store == nil {
+		return nil
+	}
+	jobs, err := h.store.ListJobs(limit * 2)
+	if err != nil {
+		return nil
+	}
+	matches := make([]searchResult, 0, limit)
+	for _, job := range jobs {
+		score := scoreMatch(terms, job.ID, string(job.Status), job.Type, job.Message)
+		if score == 0 {
+			continue
+		}
+		metadata := map[string]interface{}{
+			"type":    job.Type,
+			"status":  job.Status,
+			"stage":   job.Stage,
+			"message": job.Message,
+		}
+		next := []string{
+			fmt.Sprintf("mllm jobs get %s", job.ID),
+			fmt.Sprintf("mllm jobs logs %s", job.ID),
+		}
+		if job.Status == store.JobFailed {
+			next = append(next, fmt.Sprintf("mllm jobs retry %s --watch", job.ID))
+		}
+		matches = append(matches, searchResult{
+			Type:        "jobs",
+			ID:          job.ID,
+			Name:        fmt.Sprintf("%s (%s)", job.Type, job.Status),
+			Description: job.Message,
+			Score:       score,
+			Metadata:    metadata,
+			NextActions: next,
+		})
+		if len(matches) >= limit {
+			break
+		}
+	}
+	return matches
+}
+
+func (h *Handler) searchHFModels(ctx context.Context, terms []string, limit int) []searchResult {
+	if h.hfCache == nil {
+		return nil
+	}
+	models, err := h.hfCache.List(ctx)
+	if err != nil {
+		return nil
+	}
+	matches := make([]searchResult, 0, limit)
+	for _, model := range models {
+		score := scoreMatch(terms, model.ID, model.ModelID, model.Author, strings.Join(model.Tags, ","))
+		if score == 0 {
+			continue
+		}
+		metadata := map[string]interface{}{
+			"author": model.Author,
+			"sha":    model.SHA,
+			"tags":   model.Tags,
+		}
+		next := []string{
+			fmt.Sprintf("mllm weights install %s --target %s", model.ID, strings.ReplaceAll(model.ID, "/", "-")),
+		}
+		matches = append(matches, searchResult{
+			Type:        "hf_models",
+			ID:          model.ID,
+			Name:        model.ModelID,
+			Description: fmt.Sprintf("Author: %s | Downloads: %d", model.Author, model.Downloads),
+			Score:       score,
+			Metadata:    metadata,
+			NextActions: next,
+		})
+		if len(matches) >= limit {
+			break
+		}
+	}
+	return matches
+}
+
+func (h *Handler) searchNotifications(terms []string, limit int) []searchResult {
+	if h.store == nil {
+		return nil
+	}
+	channels, err := h.store.ListNotifications()
+	if err != nil {
+		return nil
+	}
+	matches := make([]searchResult, 0, limit)
+	for _, channel := range channels {
+		score := scoreMatch(terms, channel.Name, channel.Target, channel.Type)
+		if score == 0 {
+			continue
+		}
+		metadata := map[string]interface{}{
+			"type":   channel.Type,
+			"target": channel.Target,
+		}
+		matches = append(matches, searchResult{
+			Type:        "notifications",
+			ID:          channel.Name,
+			Name:        channel.Name,
+			Description: fmt.Sprintf("%s -> %s", channel.Type, channel.Target),
+			Score:       score,
+			Metadata:    metadata,
+			NextActions: []string{
+				fmt.Sprintf("mllm notify get %s", channel.Name),
+				fmt.Sprintf("mllm notify test --name %s --message \"Test message\"", channel.Name),
+			},
+		})
+		if len(matches) >= limit {
+			break
+		}
+	}
+	return matches
+}
+
+func writeJSONToZip(zw *zip.Writer, name string, payload interface{}) error {
+	if zw == nil || payload == nil || name == "" {
+		return nil
+	}
+	data, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return err
+	}
+	w, err := zw.Create(name)
+	if err != nil {
+		return err
+	}
+	_, err = w.Write(data)
+	return err
+}
+
+func writeTextToZip(zw *zip.Writer, name, content string) error {
+	if zw == nil || name == "" {
+		return nil
+	}
+	w, err := zw.Create(name)
+	if err != nil {
+		return err
+	}
+	_, err = w.Write([]byte(content))
+	return err
+}
+
+func writeMetricsToZip(zw *zip.Writer) error {
+	if zw == nil {
+		return nil
+	}
+	mfs, err := prometheus.DefaultGatherer.Gather()
+	if err != nil {
+		return err
+	}
+	var buf bytes.Buffer
+	for _, mf := range mfs {
+		if _, err := expfmt.MetricFamilyToText(&buf, mf); err != nil {
+			return err
+		}
+	}
+	w, err := zw.Create("metrics.txt")
+	if err != nil {
+		return err
+	}
+	_, err = w.Write(buf.Bytes())
+	return err
+}
+
+func stringOrDefault(value, fallback string) string {
+	if strings.TrimSpace(value) == "" {
+		return fallback
+	}
+	return value
+}
+
+func (h *Handler) buildSupportBundle(ctx context.Context) (*bytes.Buffer, error) {
+	buf := &bytes.Buffer{}
+	zw := zip.NewWriter(buf)
+	defer zw.Close()
+
+	summary, _ := h.buildSystemSummary(ctx)
+	_ = writeTextToZip(zw, "README.txt", fmt.Sprintf("Model Manager Support Bundle\nGenerated at: %s\nVersion: %s\n", time.Now().UTC().Format(time.RFC3339), h.opts.Version))
+	_ = writeJSONToZip(zw, "summary.json", summary)
+
+	if runtime, ok := summary["runtime"]; ok {
+		_ = writeJSONToZip(zw, "runtime-status.json", runtime)
+	}
+
+	if h.weights != nil {
+		if infos, err := h.weights.List(); err == nil {
+			_ = writeJSONToZip(zw, "weights.json", infos)
+		}
+		if stats, err := h.weights.GetStats(); err == nil {
+			_ = writeJSONToZip(zw, "weights-usage.json", stats)
+		}
+	}
+
+	if h.store != nil {
+		if jobs, err := h.store.ListJobs(50); err == nil {
+			_ = writeJSONToZip(zw, "jobs.json", jobs)
+		}
+		if history, err := h.store.ListHistory(50); err == nil {
+			_ = writeJSONToZip(zw, "history.json", history)
+		}
+		if notifications, err := h.store.ListNotifications(); err == nil {
+			_ = writeJSONToZip(zw, "notifications.json", notifications)
+		}
+	}
+
+	if h.hfCache != nil {
+		if models, err := h.hfCache.List(ctx); err == nil {
+			_ = writeJSONToZip(zw, "huggingface-cache.json", models)
+		}
+	}
+
+	if err := writeMetricsToZip(zw); err != nil {
+		log.Printf("failed to gather metrics for support bundle: %v", err)
+	}
+
+	if err := zw.Close(); err != nil {
+		return nil, err
+	}
+	return buf, nil
 }

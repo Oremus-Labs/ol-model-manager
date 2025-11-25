@@ -56,6 +56,28 @@ func (c *Client) GetJSON(path string, target interface{}) error {
 	return c.do(req, target)
 }
 
+func (c *Client) GetBinary(path string) ([]byte, error) {
+	base := strings.TrimRight(c.BaseURL, "/")
+	req, err := http.NewRequest(http.MethodGet, base+path, nil)
+	if err != nil {
+		return nil, err
+	}
+	if c.Token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.Token)
+	}
+	req.Header.Set("Accept", "application/octet-stream")
+	httpClient := &http.Client{Timeout: c.Timeout}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("%s %s failed: %s", req.Method, req.URL.Path, resp.Status)
+	}
+	return io.ReadAll(resp.Body)
+}
+
 func (c *Client) post(path string, body io.Reader, target interface{}) error {
 	base := strings.TrimRight(c.BaseURL, "/")
 	req, err := http.NewRequest(http.MethodPost, base+path, body)

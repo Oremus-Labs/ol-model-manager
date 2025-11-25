@@ -256,6 +256,10 @@ To unlock a faithful Docker Desktop-like UI we need a final backend/CLI sweep. E
 3. **Support bundle**: `/support/bundle` packages recent API/worker/sync logs + metrics snapshots. CLI `mllm support bundle` downloads the archive locally (optionally uploads to S3).
 4. **Audit**: ensure search/support actions record audit log entries surfaced via existing `/history`.
 
+✅ **Phase 6C (2025-11-25)**  
+- `/search` now fans out across catalog models, cached weights, jobs, cached Hugging Face metadata, and notification channels. The handler ranks matches by fuzzy-score, annotates suggested next actions (e.g., `mllm runtime activate <id>` or `mllm jobs logs <id>`), and records an audit history entry for every request. The CLI gained `mllm search` with `--type`, `--limit`, and `--open` flags so operators can surface the same data from their terminal.  
+- Added `/support/bundle` which snapshots the latest system summary, runtime status, weight stats, job list, history, notification config, Hugging Face cache, and Prometheus metrics into a ZIP archive. `mllm support bundle --output support-bundle-<timestamp>.zip` downloads the archive locally for escalations. Both API and CLI flows write history entries so audit timelines capture bundle generation.
+
 #### Phase 6D – Notifications, metrics polish, alerts
 1. **Notification history**: Expand `/notifications` with `/notifications/:name/history` and CLI `mllm notify history`.
 2. **Metrics summary**: Provide `/metrics/summary` (JSON) aggregating Prom series (SSE connections, queue depth, job throughput), plus CLI `mllm metrics top` for textual dashboards.

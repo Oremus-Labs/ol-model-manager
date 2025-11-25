@@ -22,7 +22,7 @@ import (
 	"github.com/oremus-labs/ol-model-manager/internal/worker"
 )
 
-const workerVersion = "0.5.20-go"
+const workerVersion = "0.5.21-go"
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
