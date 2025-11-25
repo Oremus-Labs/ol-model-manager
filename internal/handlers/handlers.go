@@ -41,6 +41,7 @@ import (
 	"github.com/oremus-labs/ol-model-manager/internal/vllm"
 	"github.com/oremus-labs/ol-model-manager/internal/weights"
 	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/prometheus/common/expfmt"
 	"sigs.k8s.io/yaml"
 )
@@ -155,6 +156,7 @@ type Handler struct {
 	lastCatalogRefresh time.Time
 	catalogStatus      string
 	catalogCacheTime   time.Time
+	pvcAlertActive     bool
 }
 
 type requestError struct {
@@ -545,6 +547,26 @@ func (h *Handler) SystemInfo(c *gin.Context) {
 func (h *Handler) SystemSummary(c *gin.Context) {
 	summary, _ := h.buildSystemSummary(c.Request.Context())
 	c.JSON(http.StatusOK, summary)
+}
+
+// MetricsSummary returns aggregated metrics for dashboards/CLI.
+func (h *Handler) MetricsSummary(c *gin.Context) {
+	summary, stats := h.buildSystemSummary(c.Request.Context())
+	resp := gin.H{
+		"jobs":        summary["jobs"],
+		"queue":       summary["queue"],
+		"alerts":      summary["alerts"],
+		"huggingface": summary["huggingface"],
+		"weights":     summary["weights"],
+	}
+	if runtime, ok := summary["runtime"]; ok {
+		resp["runtime"] = runtime
+	}
+	if stats != nil && stats.TotalBytes > 0 {
+		resp["weightsUsagePercent"] = float64(stats.UsedBytes) / float64(stats.TotalBytes) * 100
+	}
+	resp["prometheus"] = capturePromGauges()
+	c.JSON(http.StatusOK, resp)
 }
 
 func (h *Handler) buildSystemSummary(ctx context.Context) (gin.H, *weights.StorageStats) {
@@ -1761,6 +1783,42 @@ func (h *Handler) DeleteNotification(c *gin.Context) {
 	}
 	h.recordHistory("notification_deleted", "", map[string]interface{}{"name": name})
 	c.JSON(http.StatusOK, gin.H{"status": "deleted"})
+}
+
+// NotificationHistory returns recent history entries for a notification channel.
+func (h *Handler) NotificationHistory(c *gin.Context) {
+	if h.store == nil {
+		c.JSON(http.StatusNotImplemented, gin.H{"error": "persistent store not configured"})
+		return
+	}
+	name := strings.TrimSpace(c.Param("name"))
+	if name == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "name is required"})
+		return
+	}
+	limit := parseLimit(c, "limit", 20, 200)
+	entries, err := h.store.ListHistory(limit * 3)
+	if err != nil {
+		log.Printf("Failed to list history: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load history"})
+		return
+	}
+	filtered := make([]store.HistoryEntry, 0, limit)
+	for _, entry := range entries {
+		if !strings.HasPrefix(entry.Event, "notification_") {
+			continue
+		}
+		if entry.Metadata != nil {
+			if metaName, ok := entry.Metadata["name"].(string); ok && !strings.EqualFold(metaName, name) {
+				continue
+			}
+		}
+		filtered = append(filtered, entry)
+		if len(filtered) >= limit {
+			break
+		}
+	}
+	c.JSON(http.StatusOK, gin.H{"history": filtered})
 }
 
 func (h *Handler) ensureSecretManager(c *gin.Context) bool {
@@ -3033,9 +3091,12 @@ func installRequestFromPayload(data map[string]interface{}) (jobs.InstallRequest
 
 func (h *Handler) collectAlerts(stats *weights.StorageStats) []gin.H {
 	var alerts []gin.H
+	triggered := false
+	var usage float64
 	if stats != nil && stats.TotalBytes > 0 && h.opts.PVCAlertThreshold > 0 {
-		usage := float64(stats.UsedBytes) / float64(stats.TotalBytes)
+		usage = float64(stats.UsedBytes) / float64(stats.TotalBytes)
 		if usage >= h.opts.PVCAlertThreshold {
+			triggered = true
 			alerts = append(alerts, gin.H{
 				"level":   "warning",
 				"kind":    "storage",
@@ -3043,7 +3104,21 @@ func (h *Handler) collectAlerts(stats *weights.StorageStats) []gin.H {
 			})
 		}
 	}
+	h.maybeEmitStorageAlert(triggered, usage)
 	return alerts
+}
+
+func (h *Handler) maybeEmitStorageAlert(triggered bool, usage float64) {
+	if triggered && !h.pvcAlertActive {
+		meta := gin.H{"kind": "storage", "usagePercent": usage * 100}
+		h.publishEvent("alert.triggered", meta)
+		h.recordHistory("alert_triggered", "", map[string]interface{}{"kind": "storage", "usagePercent": usage * 100})
+	} else if !triggered && h.pvcAlertActive {
+		meta := gin.H{"kind": "storage", "usagePercent": usage * 100}
+		h.publishEvent("alert.resolved", meta)
+		h.recordHistory("alert_resolved", "", map[string]interface{}{"kind": "storage", "usagePercent": usage * 100})
+	}
+	h.pvcAlertActive = triggered
 }
 
 func filterHistory(entries []store.HistoryEntry, event, modelID string) []store.HistoryEntry {
@@ -3549,6 +3624,39 @@ func stringOrDefault(value, fallback string) string {
 		return fallback
 	}
 	return value
+}
+
+func capturePromGauges() map[string]float64 {
+	wanted := map[string]struct{}{
+		"model_manager_job_queue_depth":  {},
+		"model_manager_sse_connections":  {},
+		"model_manager_hf_models_cached": {},
+	}
+	values := make(map[string]float64)
+	mfs, err := prometheus.DefaultGatherer.Gather()
+	if err != nil {
+		return values
+	}
+	for _, mf := range mfs {
+		name := mf.GetName()
+		if _, ok := wanted[name]; !ok {
+			continue
+		}
+		if len(mf.Metric) == 0 {
+			continue
+		}
+		switch mf.GetType() {
+		case dto.MetricType_GAUGE:
+			values[name] = mf.Metric[0].GetGauge().GetValue()
+		case dto.MetricType_COUNTER:
+			values[name] = mf.Metric[0].GetCounter().GetValue()
+		case dto.MetricType_UNTYPED:
+			values[name] = mf.Metric[0].GetUntyped().GetValue()
+		default:
+			continue
+		}
+	}
+	return values
 }
 
 func (h *Handler) buildSupportBundle(ctx context.Context) (*bytes.Buffer, error) {

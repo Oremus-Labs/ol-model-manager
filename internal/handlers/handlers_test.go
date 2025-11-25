@@ -693,6 +693,77 @@ func TestSupportBundleEndpoint(t *testing.T) {
 	}
 }
 
+func TestNotificationHistoryEndpoint(t *testing.T) {
+	t.Parallel()
+
+	stateStore := openTestStore(t)
+	if err := stateStore.AppendHistory(&store.HistoryEntry{
+		Event:    "notification_test",
+		Metadata: map[string]interface{}{"name": "alerts", "message": "hello"},
+	}); err != nil {
+		t.Fatalf("AppendHistory: %v", err)
+	}
+
+	handler := New(nil, nil, nil, nil, nil, nil, nil, stateStore, nil, nil, nil, nil, nil, nil, Options{})
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/notifications/alerts/history", nil)
+	c, _ := gin.CreateTestContext(w)
+	c.Params = append(c.Params, gin.Param{Key: "name", Value: "alerts"})
+	c.Request = req
+
+	handler.NotificationHistory(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 got %d body=%s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		History []store.HistoryEntry `json:"history"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode history: %v", err)
+	}
+	if len(resp.History) != 1 {
+		t.Fatalf("expected 1 history entry, got %d", len(resp.History))
+	}
+}
+
+func TestMetricsSummaryEndpoint(t *testing.T) {
+	t.Parallel()
+
+	cat := catalog.New("", "")
+	cat.Restore(nil)
+
+	handler := New(cat, nil, &fakeWeightStore{
+		statsResp: &weights.StorageStats{
+			TotalBytes: 100,
+			UsedBytes:  50,
+		},
+	}, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, Options{})
+	handler.lastCatalogRefresh = time.Now()
+	handler.catalogStatus = "fresh"
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/metrics/summary", nil)
+	c, _ := gin.CreateTestContext(w)
+	c.Request = req
+
+	handler.MetricsSummary(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 got %d body=%s", w.Code, w.Body.String())
+	}
+	var resp map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode metrics: %v", err)
+	}
+	if _, ok := resp["queue"]; !ok {
+		t.Fatalf("expected queue field in response")
+	}
+	if _, ok := resp["prometheus"]; !ok {
+		t.Fatalf("expected prometheus field in response")
+	}
+}
+
 type fakeWeightStore struct {
 	listResp        []weights.WeightInfo
 	getResp         *weights.WeightInfo

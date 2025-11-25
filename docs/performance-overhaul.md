@@ -265,6 +265,11 @@ To unlock a faithful Docker Desktop-like UI we need a final backend/CLI sweep. E
 2. **Metrics summary**: Provide `/metrics/summary` (JSON) aggregating Prom series (SSE connections, queue depth, job throughput), plus CLI `mllm metrics top` for textual dashboards.
 3. **Alerting**: Add PVC/job failure threshold detection in the API; emit `alert.triggered` SSE events and expose current alerts via `/system/summary`.
 
+✅ **Phase 6D (2025-11-25)**  
+- `/notifications/:name/history` returns recent channel events (create/update/delete/test) so the CLI/ UI can audit activity; `mllm notify history <name> --limit 20` wraps the API with table/JSON output.  
+- `/metrics/summary` aggregates queue depth, job counts, weight usage, alerts, and selected Prometheus gauges (`model_manager_job_queue_depth`, `model_manager_sse_connections`, `model_manager_hf_models_cached`). `mllm metrics top` prints a dashboard-style view while `-o json` enables scripting.  
+- Storage alerts now emit history + SSE events on threshold crossing (`alert.triggered` / `alert.resolved`), so dashboards can subscribe instead of polling. `/system/summary` still reports the active alert state.
+
 Each sub-phase ends with:
 - `go test ./...`
 - Docker image build/push (`ghcr.io/oremus-labs/ol-model-manager:<tag>`)
