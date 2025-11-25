@@ -137,6 +137,77 @@ Hit /health, /events, /jobs endpoints.
 Run a sample install job and observe real-time updates via WebSocket or API.
 For background sync, see logs and cached responses.
 
+## CLI & Control-Plane Roadmap (`mllm`)
+
+We are building a Docker/Kubectl-grade CLI that interacts with every facet of the control plane.
+
+### CLI Foundation
+- Go/cobra binary, config in `~/.config/mllm/config.yaml` with multiple contexts.
+- Global flags: `--context`, `--namespace`, `-o table|json|yaml`, `--watch`.
+- Core commands: `mllm status`, `mllm login`, `mllm config set-context/use-context`, `mllm completion bash|zsh|fish`.
+
+### Model Lifecycle
+- `mllm models list/get/describe/history`.
+- YAML authoring workflow: `init`, `validate`, `apply`, `diff`, `delete`.
+- Rollouts: `mllm models promote <id> --strategy blue-green`, `rollout status`, `models history`.
+
+### Weights Management
+- `mllm weights list/install/delete/prune/usage/verify`.
+- Future: rsync/export commands for off-cluster backups.
+
+### Jobs & Diagnostics
+- `mllm jobs list/describe/logs --follow`.
+- Cancellation and retry controls once backend supports them.
+
+### Runtime & Activations
+- `mllm runtime status --watch`, `runtime events --since`.
+- `mllm runtime logs <pod> --container kserve`, `runtime diagnose`, future `runtime scale/exec`.
+
+### Hugging Face Discovery
+- `mllm hf search/describe/cache refresh`.
+- Show compatibility, recommended catalog snippets, file breakdown.
+
+### Secrets, Policy, Notifications
+- `mllm secrets list/set/get/delete`.
+- `mllm notify set --slack-webhook ...`.
+- `mllm policy list/apply`, `audit list --since`.
+
+### Backup & Maintenance
+- `mllm backup run`, `backup list/restore`.
+- `mllm cleanup orphaned-weights --dry-run`.
+
+### Plugins & Advanced UX
+- `mllm plugin list/install/remove`, pass-through to `mllm-*` binaries.
+- JSONPath output filtering, context awareness, progress spinners.
+
+### Backend Support Needed
+- Activation staging/rollout endpoints, placement recommendations.
+- Managed secrets API, audit log exports, backup triggers.
+- Job log storage, cancellation API, notifications/webhooks.
+- YAML schema publication and validation endpoints.
+
+Implementation phases:
+1. CLI scaffolding + config + `status`/`models list`.
+2. YAML workflow (init/validate/apply/diff).
+3. Job/weights commands with streaming logs.
+4. Activation rollout & placement intelligence.
+5. Secrets/notifications/backup.
+6. Plugins, completion, documentation polish.
+
+**Verification – 2025-11-24**
+- `cmd/mllm` bootstrap landed with cobra-based root command, persistent config (`~/.config/mllm/config.yaml`), and initial verbs:
+  - `mllm config set-context`, `use-context`, `current-context`, and `view`.
+  - `mllm status` (pulls `/system/info`) and `mllm models list/get`.
+- `go test ./...` covers the new package, and running `mllm status --server https://model-manager-api.oremuslabs.app --token $MM_TOKEN` shows live control-plane stats.
+- ✅ **Phase 2 (YAML workflow) – 2025-11-24**
+  - Added `mllm models init|validate|apply|diff` with YAML authoring helpers, manifest-to-JSON conversion, and validation summaries that mirror backend checks.
+  - API helpers (`PostJSON`, `PostRawJSON`) plus diffing via `cmp.Diff` enable parity with `kubectl apply` workflows, and validation results print both SSE-friendly JSON and tabular reports.
+  - Verification: created `/tmp/qwen-manifest.yaml` via `mllm models init --id qwen2.5-0.5b-instruct ...`, then ran `mllm models validate ...` and `mllm models apply ...` against `https://model-manager-api.oremuslabs.app` using the production token; outputs showed pass/warn checks and successfully hit `/catalog/validate`. `mllm models diff ...` returned the structured differences between the new manifest and the live catalog while `go test ./...` stayed green.
+- ✅ **Phase 3 (Jobs & weights UX + GPU guard) – 2025-11-24**
+  - Introduced `mllm jobs list|get|watch` for tailing Redis-backed installs, and `mllm weights list|usage|info|install|delete` for PVC management. `--watch` streams SSE frames, so large downloads show progress without polling.
+  - Added runtime-awareness to `mllm weights install`: if the active InferenceService monopolises the lone GPU, the CLI prompts (or `--preempt-active` auto-confirms) to deactivate `active-llm`, waits for the pending pods to drain, then re-activates the model after installation. This prevents the “pod never schedules” failure mode.
+  - Verified end-to-end by staging multiple `sshleifer/tiny-gpt2` targets, exercising `mllm jobs watch <job-id>`, and confirming the worker logs and SSE stream report `weight_install_completed`. After forcing a GPU contention scenario, the CLI now warns, deactivates, and reactivates automatically once jobs finish.
+
 ---
 
 ## UI Track – Docker Desktop Clone
