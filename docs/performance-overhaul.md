@@ -310,6 +310,44 @@ After Phase 6, the backend and CLI expose the same high-level affordances Docker
 
 ---
 
+## Phase 7 – Governance & Automation (🚧 next)
+
+Even with Phase 6 complete, we still need to harden the platform before we re-create Docker Desktop in the UI.
+
+1. **Notification + token lifecycle**
+   - Channel rotation (`/notifications/:name/rotate`, CLI `mllm notify rotate`).
+   - Token expiry + last-used metadata exposed via `/tokens` and `mllm tokens list`.
+   - Delivery health counters surfaced in `/metrics/summary`.
+2. **Policy / audit improvements**
+   - JSONPath-aware filtering and CSV export for `/history`.
+   - Policy linting, bundles, and rollback support.
+3. **Background automation**
+   - Scheduled cleanup of stale jobs/weights/history governed by policy thresholds.
+   - Backup orchestration (`/backups/run`, CLI `mllm backups run|list|restore`).
+   - Runtime diagnostics bundle (kserve manifest diff, log snapshots).
+
+## Phase 8 – Desktop UI Implementation
+
+This encompasses the Next.js frontend work. Deliverables:
+
+1. **Shell & auth** – Layout scaffold, SSO integration, API token storage.
+2. **Design system** – Docker Desktop-inspired components (cards, tables, drawers, log panels).
+3. **Pages** – Dashboard, Models, Jobs, Weights, HF Library, Settings, Playbooks with live SSE data.
+4. **Quick actions** – One-click install/activate, rollback, cleanup with guardrails.
+5. **QA/polish** – Keyboard shortcuts, responsive breakpoints, dark/light modes, Storybook + Playwright coverage.
+
+## Phase 9 – Extensions & Insights
+
+Future-ready enhancements once the UI lands:
+
+1. **Extension SDK** – Webhook callbacks, automation templates, CLI plug-ins.
+2. **Analytics** – Historical job/activation charts, SLA exports, anomaly detection.
+3. **Upgrade tooling** – Drift detection, health probes, bundle uploads for support workflows.
+
+Each remaining phase will mirror the current workflow: design, implement, `go test ./...`, Docker build/push, GitOps bump, ArgoCD sync, live verification via `mllm`.
+
+---
+
 ## UI Track – Docker Desktop Clone
 
 ### Phase A – Architecture & Layout Mapping
