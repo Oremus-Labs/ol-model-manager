@@ -2,8 +2,6 @@ package weights
 
 import (
 	"context"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,26 +12,21 @@ func TestInstallFromHuggingFaceDownloadsFiles(t *testing.T) {
 	t.Parallel()
 
 	tmpDir := t.TempDir()
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("/Qwen/Qwen2.5-0.5B/resolve/main/model.safetensors", func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("tiny-model"))
-	})
-
-	srv := httptest.NewServer(mux)
-	t.Cleanup(srv.Close)
-
-	manager := New(tmpDir, WithHFBaseURL(srv.URL), WithHTTPClient(srv.Client()))
+	manager := New(tmpDir, WithHFDownloader(func(ctx context.Context, opts InstallOptions, tmpPath, revision string) error {
+		if err := os.MkdirAll(filepath.Join(tmpPath, "subdir"), 0o755); err != nil {
+			return err
+		}
+		return os.WriteFile(filepath.Join(tmpPath, "subdir", "model.safetensors"), []byte("tiny-model"), 0o644)
+	}))
 
 	info, err := manager.InstallFromHuggingFace(context.Background(), InstallOptions{
 		ModelID: "Qwen/Qwen2.5-0.5B",
-		Files:   []string{"model.safetensors"},
 	})
 	if err != nil {
 		t.Fatalf("InstallFromHuggingFace() error = %v", err)
 	}
 
-	expectedPath := filepath.Join(tmpDir, "Qwen", "Qwen2.5-0.5B", "model.safetensors")
+	expectedPath := filepath.Join(tmpDir, "Qwen", "Qwen2.5-0.5B", "subdir", "model.safetensors")
 	data, err := os.ReadFile(expectedPath)
 	if err != nil {
 		t.Fatalf("failed to read downloaded file: %v", err)
@@ -49,22 +42,6 @@ func TestInstallFromHuggingFaceDownloadsFiles(t *testing.T) {
 
 	if info.SizeBytes != int64(len("tiny-model")) {
 		t.Fatalf("expected size %d, got %d", len("tiny-model"), info.SizeBytes)
-	}
-
-	cacheFile := filepath.Join(tmpDir, ".hf-cache", "hub", "models--Qwen--Qwen2.5-0.5B", "snapshots", "main", "model.safetensors")
-	cacheInfo, err := os.Lstat(cacheFile)
-	if err != nil {
-		t.Fatalf("expected cache snapshot symlink at %s: %v", cacheFile, err)
-	}
-	if cacheInfo.Mode()&os.ModeSymlink == 0 {
-		t.Fatalf("expected %s to be a symlink", cacheFile)
-	}
-	targetPath, err := os.Readlink(cacheFile)
-	if err != nil {
-		t.Fatalf("failed to read symlink: %v", err)
-	}
-	if targetPath != expectedPath {
-		t.Fatalf("expected cache symlink target %s, got %s", expectedPath, targetPath)
 	}
 }
 

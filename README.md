@@ -12,7 +12,7 @@ HTTP API service for dynamically managing KServe InferenceServices based on mode
 - List available models from git-synced catalog with automatic refresh caching
 - Activate and deactivate KServe InferenceServices for catalog entries (now also exposed via `/runtime/*` endpoints for richer orchestration data)
 - Inspect and manage cached HuggingFace weights on the Venus PVC
-- Install new model weights directly from HuggingFace (with optional auth token) with async job tracking
+- Install new model weights directly from HuggingFace via the official `hf download` CLI (with optional auth token) with async job tracking and CLI resume support
 - Generate draft catalog entries from HuggingFace metadata via vLLM discovery helpers and manifest previews
 - Search the Hugging Face Hub for vLLM-compatible models and inspect metadata before installing
 - Publish a live OpenAPI spec + Swagger UI so UI/automation teams can self-discover endpoints
@@ -35,9 +35,11 @@ HTTP API service for dynamically managing KServe InferenceServices based on mode
 - `ACTIVE_NAMESPACE` - Kubernetes namespace for InferenceServices (default: `ai`)
 - `ACTIVE_INFERENCESERVICE_NAME` - Name of the InferenceService to manage (default: `active-llm`)
 - `WEIGHTS_STORAGE_PATH` - Root directory for cached weights on the PVC (default: `/mnt/models`)
-- `WEIGHTS_INSTALL_TIMEOUT` - Timeout for weight installation operations (default: `30m`)
 - `WEIGHTS_PVC_NAME` - Name of the PVC backing the cache (default: `venus-model-storage`)
 - `INFERENCE_MODEL_ROOT` - Path where KServe mounts the PVC inside runtime containers (default: `/mnt/models`)
+- `WEIGHTS_INSTALL_TIMEOUT` - Upper bound for individual weight install jobs (default: `30m`; increase for very large models if needed)
+- `HF_HOME` / `HF_HUB_CACHE` - Directory where the Hugging Face CLI stores its cache/snapshots (default: `/mnt/models/.hf-cache`)
+- `HF_HUB_DOWNLOAD_TIMEOUT` - Socket timeout (in seconds) passed to the Hugging Face CLI (default via Helm: `18000`)
 - `GPU_PROFILE_PATH` - Optional JSON file describing cluster GPU profiles (default: `/app/config/gpu-profiles.json`)
 - `STATE_PATH` - Directory where the BoltDB/SQLite state file (jobs/history) is stored (default: `/app/state`)
 - `DATASTORE_DRIVER` - Persistence backend (`bolt` today, `sqlite` once Phase 1 ships) (default: `bolt`)
@@ -112,7 +114,7 @@ See [`docs/performance-overhaul.md`](docs/performance-overhaul.md) for the full 
 - `GET /weights/usage` - PVC usage statistics
 - `GET /weights/{name}/info` - Inspect a specific weight directory
 - `DELETE /weights/{name}` - Delete cached weights
-- `POST /weights/install` - Install weights from HuggingFace (body includes `hfModelId`, optional `revision`, `files`, etc.)
+- `POST /weights/install` - Install weights from HuggingFace using the `hf download` CLI (body includes `hfModelId`, optional `revision`, `files`, etc.)
   - Response includes the `storageUri` (`pvc://...`) and `inferenceModelPath` you can paste directly into the catalog entry (`MODEL_ID` env) so the runtime loads the cached copy. When async mode is enabled the endpoint returns `202 Accepted` plus a `job` object you can poll below.
 - `GET /weights/install/status/{id}` - Convenience alias for checking install job status
 - `GET /jobs` / `GET /jobs/{id}` - Inspect asynchronous work (weight installs, etc.)

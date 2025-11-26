@@ -23,7 +23,8 @@ RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -ldflags="-w -s" -o 
 # Final stage
 FROM alpine:latest
 
-RUN apk --no-cache add ca-certificates
+RUN apk --no-cache add ca-certificates python3 py3-pip git
+RUN pip install --no-cache-dir --break-system-packages "huggingface_hub[cli]" && ln -sf /usr/bin/hf /usr/bin/huggingface-cli
 
 WORKDIR /app
 RUN mkdir -p /app/config

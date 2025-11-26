@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"math"
 	"path"
 	"time"
 
@@ -141,6 +140,7 @@ func (m *Manager) processJob(job *store.Job, req InstallRequest) {
 	m.logJob(job, "info", "preparing", "Preparing cache directory")
 	m.updateJob(job, store.JobRunning, 15, "preparing", "Preparing cache directory")
 
+	m.updateJob(job, store.JobRunning, 25, "downloading", "Downloading weights via Hugging Face CLI (this may take a while)")
 	info, err := m.weights.InstallFromHuggingFace(ctx, weights.InstallOptions{
 		ModelID:   req.ModelID,
 		Revision:  req.Revision,
@@ -148,36 +148,6 @@ func (m *Manager) processJob(job *store.Job, req InstallRequest) {
 		Files:     req.Files,
 		Token:     m.hfToken,
 		Overwrite: req.Overwrite,
-		ProgressBytes: func(file string, fileIndex, total int, downloaded, totalBytes int64) {
-			if total == 0 {
-				return
-			}
-			fraction := float64(fileIndex)
-			if totalBytes > 0 && downloaded > 0 {
-				ratio := float64(downloaded) / float64(totalBytes)
-				if ratio > 1 {
-					ratio = 1
-				}
-				fraction += ratio
-			}
-			progress := 20 + int(math.Round((fraction/float64(total))*70))
-			msg := fmt.Sprintf("Downloading %s", file)
-			if totalBytes > 0 && downloaded >= 0 {
-				msg = fmt.Sprintf("Downloading %s (%0.1f%%)", file, float64(downloaded)/float64(totalBytes)*100)
-			}
-			m.updateJob(job, store.JobRunning, progress, "downloading", msg)
-		},
-		Progress: func(file string, completed, total int) {
-			progress := 20
-			if total > 0 {
-				progress = 20 + int(math.Round(float64(completed)/float64(total)*70))
-			}
-			msg := "Downloading weights"
-			if file != "" {
-				msg = fmt.Sprintf("Downloading %s (%d/%d)", file, completed, total)
-			}
-			m.updateJob(job, store.JobRunning, progress, "downloading", msg)
-		},
 	})
 
 	if err != nil {

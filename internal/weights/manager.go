@@ -2,14 +2,15 @@
 package weights
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"io/fs"
 	"log"
-	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -19,29 +20,19 @@ import (
 
 // Manager handles model weight operations on the Venus PVC.
 type Manager struct {
-	storagePath    string
-	downloadClient *http.Client
-	hfBaseURL      string
-	reservedNames  map[string]struct{}
+	storagePath   string
+	reservedNames map[string]struct{}
+	hfDownloader  func(context.Context, InstallOptions, string, string) error
 }
 
 // Option configures a Manager at construction.
 type Option func(*Manager)
 
-// WithHTTPClient overrides the HTTP client used for downloads.
-func WithHTTPClient(client *http.Client) Option {
+// WithHFDownloader overrides the default Hugging Face CLI download runner (useful for tests).
+func WithHFDownloader(fn func(context.Context, InstallOptions, string, string) error) Option {
 	return func(m *Manager) {
-		if client != nil {
-			m.downloadClient = client
-		}
-	}
-}
-
-// WithHFBaseURL overrides the base HuggingFace URL (useful for tests).
-func WithHFBaseURL(base string) Option {
-	return func(m *Manager) {
-		if base != "" {
-			m.hfBaseURL = strings.TrimSuffix(base, "/")
+		if fn != nil {
+			m.hfDownloader = fn
 		}
 	}
 }
@@ -94,14 +85,13 @@ type InstallOptions struct {
 // New creates a new weight manager.
 func New(storagePath string, opts ...Option) *Manager {
 	m := &Manager{
-		storagePath:    storagePath,
-		downloadClient: &http.Client{Timeout: 5 * time.Minute},
-		hfBaseURL:      "https://huggingface.co",
+		storagePath: storagePath,
 		reservedNames: map[string]struct{}{
 			".hf-cache":  {},
 			"modules":    {},
 			"lost+found": {},
 		},
+		hfDownloader: runHFDownload,
 	}
 	for _, opt := range opts {
 		opt(m)
@@ -229,12 +219,19 @@ func (m *Manager) Delete(modelName string) error {
 		return fmt.Errorf("invalid model path: path traversal detected")
 	}
 
+	var modelMeta *weightMetadata
+	if meta, err := readMetadata(modelPath); err == nil {
+		modelMeta = meta
+	}
+
 	if err := os.RemoveAll(modelPath); err != nil {
 		return fmt.Errorf("failed to delete model weights: %w", err)
 	}
 
 	m.cleanupEmptyParents(modelPath)
-	m.removeHuggingFaceCache(rel)
+	if modelMeta != nil {
+		m.purgeHFCache(modelMeta.ModelID)
+	}
 
 	return nil
 }
@@ -312,10 +309,6 @@ func (m *Manager) InstallFromHuggingFace(ctx context.Context, opts InstallOption
 		return nil, fmt.Errorf("model ID is required")
 	}
 
-	if len(opts.Files) == 0 {
-		return nil, fmt.Errorf("no files specified for download")
-	}
-
 	target, err := CanonicalTarget(opts.ModelID, opts.Target)
 	if err != nil {
 		return nil, err
@@ -347,46 +340,9 @@ func (m *Manager) InstallFromHuggingFace(ctx context.Context, opts InstallOption
 		return nil, fmt.Errorf("failed to create temp directory: %w", err)
 	}
 
-	client := m.downloadClient
-	if client == nil {
-		client = http.DefaultClient
-	}
-	var downloadedFiles int
-
-	totalFiles := len(opts.Files)
-	for _, file := range opts.Files {
-		select {
-		case <-ctx.Done():
-			_ = os.RemoveAll(tmpPath)
-			return nil, ctx.Err()
-		default:
-		}
-
-		// Skip directories
-		if strings.HasSuffix(file, "/") || file == "" {
-			continue
-		}
-
-		url := fmt.Sprintf("%s/%s/resolve/%s/%s", m.hfBaseURL, opts.ModelID, revision, file)
-		destFile := filepath.Join(tmpPath, file)
-		currentIndex := downloadedFiles
-		if err := downloadFile(ctx, client, url, destFile, opts.Token, func(downloaded, total int64) {
-			if opts.ProgressBytes != nil && totalFiles > 0 {
-				opts.ProgressBytes(file, currentIndex, totalFiles, downloaded, total)
-			}
-		}); err != nil {
-			_ = os.RemoveAll(tmpPath)
-			return nil, fmt.Errorf("failed to download %s: %w", file, err)
-		}
-		downloadedFiles++
-		if opts.Progress != nil {
-			opts.Progress(file, downloadedFiles, len(opts.Files))
-		}
-	}
-
-	if downloadedFiles == 0 {
+	if err := m.hfDownloader(ctx, opts, tmpPath, revision); err != nil {
 		_ = os.RemoveAll(tmpPath)
-		return nil, fmt.Errorf("no files downloaded for %s", opts.ModelID)
+		return nil, err
 	}
 
 	if err := os.Rename(tmpPath, destPath); err != nil {
@@ -401,14 +357,6 @@ func (m *Manager) InstallFromHuggingFace(ctx context.Context, opts InstallOption
 	}
 	if err := writeMetadata(destPath, meta); err != nil {
 		log.Printf("weights: failed to write metadata for %s: %v", target, err)
-	}
-
-	if err := m.populateHuggingFaceCache(opts.ModelID, revision, destPath); err != nil {
-		log.Printf("weights: failed to hydrate HuggingFace cache for %s: %v", target, err)
-	}
-
-	if opts.Progress != nil {
-		opts.Progress("", len(opts.Files), len(opts.Files))
 	}
 
 	info, err := m.getWeightInfo(destPath, target)
@@ -482,6 +430,69 @@ func (m *Manager) getWeightInfo(path, name string) (*WeightInfo, error) {
 	return info, nil
 }
 
+// downloadWithHFCLI shells out to the Hugging Face CLI for robust large-model transfers.
+func (m *Manager) downloadWithHFCLI(ctx context.Context, opts InstallOptions, tmpPath, revision string) error {
+	var combinedOut []byte
+
+	if revision == "" {
+		revision = "main"
+	}
+	args := []string{
+		"download",
+		opts.ModelID,
+		"--local-dir", tmpPath,
+		"--cache-dir", filepath.Join(tmpPath, ".cache"),
+	}
+	if revision != "" {
+		args = append(args, "--revision", revision)
+	}
+	if opts.Overwrite {
+		args = append(args, "--force-download")
+	}
+	if len(opts.Files) > 0 {
+		args = append(args, "--include", strings.Join(opts.Files, ","))
+	}
+
+	// Prefer the modern "hf" entrypoint; fall back to "huggingface-cli" for older installs.
+	bin, _ := exec.LookPath("hf")
+	if bin == "" {
+		bin, _ = exec.LookPath("huggingface-cli")
+	}
+	if bin == "" {
+		return fmt.Errorf("huggingface CLI is not available in PATH (expected hf or huggingface-cli)")
+	}
+
+	cmd := exec.CommandContext(ctx, bin, args...)
+	cmd.Env = os.Environ()
+	if opts.Token != "" {
+		cmd.Env = append(cmd.Env, fmt.Sprintf("HUGGING_FACE_HUB_TOKEN=%s", opts.Token))
+	}
+	out, err := cmd.CombinedOutput()
+	combinedOut = out
+	if err != nil {
+		return fmt.Errorf("%s download failed: %w\n%s", filepath.Base(bin), err, string(out))
+	}
+
+	var fileCount int64
+	err = filepath.Walk(tmpPath, func(p string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() {
+			fileCount++
+		}
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("failed to verify download contents: %w", err)
+	}
+	if fileCount == 0 {
+		return fmt.Errorf("hf download succeeded but no files were written to %s\noutput:\n%s", tmpPath, string(combinedOut))
+	}
+
+	return nil
+}
+
 func formatBytes(bytes int64) string {
 	const unit = 1024
 	if bytes < unit {
@@ -542,75 +553,6 @@ func toFilesystemPath(rel string) string {
 	return filepath.Join(parts...)
 }
 
-func downloadFile(ctx context.Context, client *http.Client, url, destPath, token string, progress func(downloaded, total int64)) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return err
-	}
-	if token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
-	}
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return fmt.Errorf("download failed with status %d: %s", resp.StatusCode, string(body))
-	}
-
-	if err := os.MkdirAll(filepath.Dir(destPath), 0o755); err != nil {
-		return fmt.Errorf("failed to prepare path: %w", err)
-	}
-
-	tmpFile := destPath + ".part"
-	file, err := os.Create(tmpFile)
-	if err != nil {
-		return fmt.Errorf("failed to create temp file: %w", err)
-	}
-
-	var written int64
-	total := resp.ContentLength
-	buf := make([]byte, 2<<20)
-	for {
-		n, readErr := resp.Body.Read(buf)
-		if n > 0 {
-			if _, err := file.Write(buf[:n]); err != nil {
-				file.Close()
-				_ = os.Remove(tmpFile)
-				return fmt.Errorf("failed to write file: %w", err)
-			}
-			written += int64(n)
-			if progress != nil {
-				progress(written, total)
-			}
-		}
-		if readErr != nil {
-			if readErr == io.EOF {
-				break
-			}
-			file.Close()
-			_ = os.Remove(tmpFile)
-			return fmt.Errorf("failed to download file: %w", readErr)
-		}
-	}
-
-	if err := file.Close(); err != nil {
-		_ = os.Remove(tmpFile)
-		return fmt.Errorf("failed to close file: %w", err)
-	}
-
-	if err := os.Rename(tmpFile, destPath); err != nil {
-		_ = os.Remove(tmpFile)
-		return fmt.Errorf("failed to finalize file: %w", err)
-	}
-
-	return nil
-}
-
 func writeMetadata(dir string, meta weightMetadata) error {
 	data, err := json.Marshal(meta)
 	if err != nil {
@@ -659,65 +601,98 @@ func (m *Manager) cleanupEmptyParents(modelPath string) {
 	}
 }
 
-func (m *Manager) populateHuggingFaceCache(modelID, revision, sourceDir string) error {
-	if modelID == "" {
-		return nil
-	}
-	if revision == "" {
-		revision = "main"
-	}
-	cacheBase := filepath.Join(m.storagePath, ".hf-cache", "hub", formatHFCacheModelID(modelID))
-	snapshotDir := filepath.Join(cacheBase, "snapshots", revision)
-	if err := os.RemoveAll(snapshotDir); err != nil {
+func runHFDownload(ctx context.Context, opts InstallOptions, tmpPath, revision string) error {
+	bin, err := findHFCommand()
+	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(snapshotDir, 0o755); err != nil {
-		return err
+	args := []string{"download", opts.ModelID, "--local-dir", tmpPath, "--revision", revision, "--resume-download"}
+	if len(opts.Files) > 0 {
+		args = append(args, opts.Files...)
+	}
+	cmd := exec.CommandContext(ctx, bin, args...)
+	env := append([]string{}, os.Environ()...)
+	if opts.Token != "" {
+		env = append(env, fmt.Sprintf("HF_TOKEN=%s", opts.Token), fmt.Sprintf("HUGGING_FACE_HUB_TOKEN=%s", opts.Token))
+	}
+	if !envHas(env, "HF_HOME") {
+		env = append(env, fmt.Sprintf("HF_HOME=%s", filepath.Join(filepath.Dir(tmpPath), ".hf-cache")))
+	}
+	cmd.Env = env
+
+	var output bytes.Buffer
+	cmd.Stdout = &output
+	cmd.Stderr = &output
+
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("%s download failed: %w\n%s", filepath.Base(bin), err, output.String())
 	}
 
-	err := filepath.WalkDir(sourceDir, func(path string, d fs.DirEntry, err error) error {
+	hasFiles, err := hasAnyFiles(tmpPath)
+	if err != nil {
+		return err
+	}
+	if !hasFiles {
+		return fmt.Errorf("hf download succeeded but no files were written to %s\n%s", tmpPath, output.String())
+	}
+	return nil
+}
+
+func findHFCommand() (string, error) {
+	if bin, err := exec.LookPath("hf"); err == nil {
+		return bin, nil
+	}
+	if bin, err := exec.LookPath("huggingface-cli"); err == nil {
+		return bin, nil
+	}
+	return "", fmt.Errorf("hugging face CLI is not installed in PATH (expected hf or huggingface-cli)")
+}
+
+func envHas(env []string, key string) bool {
+	prefix := key + "="
+	for _, entry := range env {
+		if strings.HasPrefix(entry, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasAnyFiles(dir string) (bool, error) {
+	found := false
+	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		rel, err := filepath.Rel(sourceDir, path)
-		if err != nil {
-			return err
-		}
-		if rel == "." {
-			return nil
-		}
-		target := filepath.Join(snapshotDir, rel)
 		if d.IsDir() {
-			return os.MkdirAll(target, 0o755)
+			if d.Name() == ".hf-cache" || path == dir {
+				return nil
+			}
+			return nil
 		}
 		if d.Name() == metadataFilename {
 			return nil
 		}
-		_ = os.Remove(target)
-		return os.Symlink(path, target)
+		found = true
+		return io.EOF
 	})
-	if err != nil {
-		return err
+	if err != nil && err != io.EOF {
+		return false, err
 	}
-
-	if err := os.MkdirAll(filepath.Join(cacheBase, "refs"), 0o755); err != nil {
-		return err
-	}
-	refFile := filepath.Join(cacheBase, "refs", revision)
-	return os.WriteFile(refFile, []byte(revision), 0o644)
+	return found, nil
 }
 
-func (m *Manager) removeHuggingFaceCache(modelName string) {
-	if modelName == "" {
+func (m *Manager) purgeHFCache(modelID string) {
+	if modelID == "" {
 		return
 	}
-	cacheDir := filepath.Join(m.storagePath, ".hf-cache", "hub", formatHFCacheModelID(modelName))
-	_ = os.RemoveAll(cacheDir)
-}
-
-func formatHFCacheModelID(modelID string) string {
-	modelID = strings.TrimSpace(modelID)
-	modelID = strings.Trim(modelID, "/")
-	modelID = strings.ReplaceAll(modelID, "/", "--")
-	return fmt.Sprintf("models--%s", modelID)
+	bin, err := findHFCommand()
+	if err != nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, bin, "cache", "rm", fmt.Sprintf("model/%s", modelID), "-y")
+	cmd.Env = os.Environ()
+	_ = cmd.Run()
 }

@@ -19,7 +19,7 @@ import (
 	"github.com/oremus-labs/ol-model-manager/internal/vllm"
 )
 
-const syncVersion = "0.5.22-go"
+const syncVersion = "0.5.29-go"
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
