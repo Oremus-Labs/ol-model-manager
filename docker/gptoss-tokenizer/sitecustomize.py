@@ -12,11 +12,16 @@ from transformers import PreTrainedTokenizerFast
 
 if os.environ.get("SKIP_GPTOSS_PATCH") == "1":  # pragma: no cover
     vllm_mistral = None
+    hf_mistral = None
 else:
     try:
         from vllm.transformers_utils.tokenizers import mistral as vllm_mistral
     except Exception:  # pragma: no cover - unavailable in non-vLLM contexts
         vllm_mistral = None
+    try:
+        from transformers import tokenization_mistral_common as hf_mistral
+    except Exception:  # pragma: no cover - transformers extras missing
+        hf_mistral = None
 
 
 class GPTOSSTokenizerFast(PreTrainedTokenizerFast):
@@ -37,11 +42,8 @@ class GPTOSSTokenizerFast(PreTrainedTokenizerFast):
 
 
 _target_class = None
-if vllm_mistral is not None:
-    if hasattr(vllm_mistral, "TransformersMistralTokenizer"):
-        _target_class = vllm_mistral.TransformersMistralTokenizer
-    elif hasattr(vllm_mistral, "TransformersTokenizer"):
-        _target_class = vllm_mistral.TransformersTokenizer
+if hf_mistral is not None and hasattr(hf_mistral, "MistralCommonTokenizer"):
+    _target_class = hf_mistral.MistralCommonTokenizer
 
 if _target_class is not None:
 
